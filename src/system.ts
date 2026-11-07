@@ -13,14 +13,7 @@ export const IS_TAURI = isTauri() || "__TAURI_INTERNALS__" in window;
 
 // Tauri 的 ResizeDirection 未从模块导出，这里按相同字面量声明
 export type ResizeDirection =
-  | "East"
-  | "North"
-  | "NorthEast"
-  | "NorthWest"
-  | "South"
-  | "SouthEast"
-  | "SouthWest"
-  | "West";
+  "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 
 function requireTauri(): void {
   if (!IS_TAURI) {
@@ -37,18 +30,13 @@ export async function listSessions(): Promise<ListResult> {
   return invoke<ListResult>("list_sessions");
 }
 
-export async function resizeWindow(
-  width: number,
-  height: number,
-): Promise<void> {
+export async function resizeWindow(width: number, height: number): Promise<void> {
   requireTauri();
   await getCurrentWindow().setSize(new LogicalSize(width, height));
 }
 
 /** 无边框窗口的边缘/角落热区按下后，交给系统执行缩放拖拽。 */
-export async function startResizeDragging(
-  direction: ResizeDirection,
-): Promise<void> {
+export async function startResizeDragging(direction: ResizeDirection): Promise<void> {
   requireTauri();
   await getCurrentWindow().startResizeDragging(direction);
 }
@@ -84,10 +72,7 @@ export async function keepWindowInsideWorkArea(): Promise<void> {
   );
   const y = Math.max(
     workArea.position.y,
-    Math.min(
-      workArea.position.y + workArea.size.height - size.height,
-      position.y,
-    ),
+    Math.min(workArea.position.y + workArea.size.height - size.height, position.y),
   );
   if (x === position.x && y === position.y) {
     return;
@@ -147,9 +132,7 @@ export async function setAutoStart(enabled: boolean): Promise<void> {
   await invoke("set_autostart", { enabled });
 }
 
-export async function setGlobalShortcut(
-  shortcut: string | null,
-): Promise<void> {
+export async function setGlobalShortcut(shortcut: string | null): Promise<void> {
   requireTauri();
   await invoke("set_global_shortcut", { shortcut });
 }

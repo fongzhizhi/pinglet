@@ -1,5 +1,4 @@
 import { defineConfig } from "vite";
-// @ts-expect-error type error without @types/node package
 import process from "node:process";
 import packageJson from "./package.json" with { type: "json" };
 const host = process.env.TAURI_DEV_HOST;

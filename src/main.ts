@@ -137,9 +137,7 @@ type BreathingKind = "alert" | "completion";
 
 type AbnormalState = Extract<BoardState, "blocked" | "interrupted">;
 
-type ReminderEvent =
-  | { kind: "alert"; state: AbnormalState }
-  | { kind: "completion" };
+type ReminderEvent = { kind: "alert"; state: AbnormalState } | { kind: "completion" };
 
 if (!IS_TAURI) {
   document.body.classList.add("browser-preview");
@@ -152,8 +150,7 @@ const errorBarElement = requireElement<HTMLDivElement>("#error-bar");
 const summaryElement = requireElement<HTMLSpanElement>("#summary");
 const logoElement = requireElement<SVGElement>(".logo");
 const logoPendingElement = requireElement<SVGPathElement>("#logo-pending");
-const logoInterruptedElement =
-  requireElement<SVGPathElement>("#logo-interrupted");
+const logoInterruptedElement = requireElement<SVGPathElement>("#logo-interrupted");
 const logoRunningElement = requireElement<SVGCircleElement>("#logo-running");
 const heartbeatElement = requireElement<HTMLSpanElement>("#heartbeat");
 const heartbeatTextElement = requireElement<HTMLSpanElement>("#heartbeat-text");
@@ -163,8 +160,7 @@ const settingsButton = requireElement<HTMLButtonElement>("#settings-btn");
 const closeButton = requireElement<HTMLButtonElement>("#close-btn");
 const closeIconElement = requireElement<SVGElement>("#close-icon");
 const minimizeIconElement = requireElement<SVGElement>("#minimize-icon");
-const settingsBackdropElement =
-  requireElement<HTMLDivElement>("#settings-backdrop");
+const settingsBackdropElement = requireElement<HTMLDivElement>("#settings-backdrop");
 const settingsPanelElement = requireElement<HTMLElement>("#settings-panel");
 const resizeLayerElement = requireElement<HTMLDivElement>("#resize-layer");
 const tooltipElement = requireElement<HTMLDivElement>("#tooltip");
@@ -180,12 +176,8 @@ let isRefreshing = false;
 let lastSuccessfulRefreshAt: number | null = null;
 
 const storedWindowSize = readStoredWindowSize();
-let preferredWindowWidth = clampWindowWidth(
-  storedWindowSize?.width ?? DEFAULT_WINDOW_WIDTH,
-);
-let preferredWindowHeight = clampWindowHeight(
-  storedWindowSize?.height ?? DEFAULT_WINDOW_HEIGHT,
-);
+let preferredWindowWidth = clampWindowWidth(storedWindowSize?.width ?? DEFAULT_WINDOW_WIDTH);
+let preferredWindowHeight = clampWindowHeight(storedWindowSize?.height ?? DEFAULT_WINDOW_HEIGHT);
 let lastAppliedWindowWidth = preferredWindowWidth;
 let lastAppliedWindowHeight = Math.max(WINDOW_MIN_HEIGHT, window.innerHeight);
 let lastUserResizeAt = 0;
@@ -416,10 +408,7 @@ function updateRowView(
     view.entrypointTag.hidden = false;
     view.entrypointTag.textContent = entrypoint;
   }
-  view.entrypointTag.style.setProperty(
-    "--tag-color",
-    entrypointTagColor(entrypoint),
-  );
+  view.entrypointTag.style.setProperty("--tag-color", entrypointTagColor(entrypoint));
 
   const folder = directoryName(row.cwd);
   view.folder.textContent = folder;
@@ -433,19 +422,14 @@ function updateRowView(
   view.element.classList.toggle("is-disabled", isDisabled);
   view.element.tabIndex = isDisabled ? -1 : 0;
   view.element.setAttribute("aria-disabled", String(isDisabled));
-  view.element.setAttribute(
-    "aria-label",
-    `${meta.label}，${row.title}，${folder}`,
-  );
+  view.element.setAttribute("aria-label", `${meta.label}，${row.title}，${folder}`);
 }
 
 function renderRows(rows: SessionRow[]): void {
   const now = Date.now();
   const sortedRows = sortRows(rows);
   const desiredKeys = new Set(sortedRows.map((row) => getRowKey(row)));
-  const folderColors = assignFolderColorSlots(
-    sortedRows.map((row) => folderColorKey(row.cwd)),
-  );
+  const folderColors = assignFolderColorSlots(sortedRows.map((row) => folderColorKey(row.cwd)));
 
   for (const [key, view] of rowViews) {
     if (desiredKeys.has(key)) {
@@ -500,15 +484,9 @@ function renderRows(rows: SessionRow[]): void {
     }
   }
 
-  const blockedCount = sortedRows.filter(
-    (row) => classify(row) === "blocked",
-  ).length;
-  const interruptedCount = sortedRows.filter(
-    (row) => classify(row) === "interrupted",
-  ).length;
-  const workingCount = sortedRows.filter(
-    (row) => classify(row) === "working",
-  ).length;
+  const blockedCount = sortedRows.filter((row) => classify(row) === "blocked").length;
+  const interruptedCount = sortedRows.filter((row) => classify(row) === "interrupted").length;
+  const workingCount = sortedRows.filter((row) => classify(row) === "working").length;
   renderSummary(blockedCount, interruptedCount, workingCount);
   renderLogoState(blockedCount, interruptedCount, workingCount);
 
@@ -533,11 +511,7 @@ function renderLogoState(
   logoRunningElement.classList.toggle("active", workingCount > 0);
 }
 
-function renderSummary(
-  blockedCount: number,
-  interruptedCount: number,
-  workingCount: number,
-): void {
+function renderSummary(blockedCount: number, interruptedCount: number, workingCount: number): void {
   summaryElement.replaceChildren();
 
   if (blockedCount > 0) {
@@ -613,16 +587,11 @@ function pickHigherPriority(
   if (current === null) {
     return candidate;
   }
-  return STATE_META[candidate].priority < STATE_META[current].priority
-    ? candidate
-    : current;
+  return STATE_META[candidate].priority < STATE_META[current].priority ? candidate : current;
 }
 
 function setAlertColor(state: BoardState): void {
-  panelElement.style.setProperty(
-    "--alert-color",
-    `var(${STATE_COLOR_VARS[state]})`,
-  );
+  panelElement.style.setProperty("--alert-color", `var(${STATE_COLOR_VARS[state]})`);
 }
 
 function playBreathingEffect(cycles: number, kind: BreathingKind): void {
@@ -646,8 +615,7 @@ function playBreathingEffect(cycles: number, kind: BreathingKind): void {
 
 function playShakeEffect(kind: BreathingKind = "alert"): void {
   const className = kind === "alert" ? "is-shaking" : "is-shaking-once";
-  const duration =
-    kind === "alert" ? SHAKE_DURATION_MS : SHAKE_ONCE_DURATION_MS;
+  const duration = kind === "alert" ? SHAKE_DURATION_MS : SHAKE_ONCE_DURATION_MS;
 
   panelElement.classList.remove("is-shaking", "is-shaking-once");
   void panelElement.offsetWidth;
@@ -746,14 +714,8 @@ function playNotificationSound(): void {
         startAt + SOUND_DURATION_SECONDS,
       );
       gain.gain.setValueAtTime(0.0001, startAt);
-      gain.gain.exponentialRampToValueAtTime(
-        SOUND_GAIN,
-        startAt + SOUND_RAMP_SECONDS,
-      );
-      gain.gain.exponentialRampToValueAtTime(
-        0.0001,
-        startAt + SOUND_DURATION_SECONDS,
-      );
+      gain.gain.exponentialRampToValueAtTime(SOUND_GAIN, startAt + SOUND_RAMP_SECONDS);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + SOUND_DURATION_SECONDS);
 
       oscillator.connect(gain);
       gain.connect(context.destination);
@@ -869,10 +831,7 @@ function positionLogoTooltip(): void {
   if (top + tooltipRect.height > window.innerHeight - TOOLTIP_EDGE_MARGIN) {
     top = logoRect.top - tooltipRect.height - LOGO_TOOLTIP_GAP;
   }
-  left = Math.min(
-    left,
-    window.innerWidth - tooltipRect.width - TOOLTIP_EDGE_MARGIN,
-  );
+  left = Math.min(left, window.innerWidth - tooltipRect.width - TOOLTIP_EDGE_MARGIN);
 
   logoTooltipElement.style.left = `${Math.max(TOOLTIP_EDGE_MARGIN, left)}px`;
   logoTooltipElement.style.top = `${Math.max(TOOLTIP_EDGE_MARGIN, top)}px`;
@@ -908,10 +867,7 @@ function flashRow(element: HTMLElement): void {
   }, FLASH_DURATION_MS);
 }
 
-async function activateRow(
-  row: SessionRow,
-  element: HTMLElement,
-): Promise<void> {
+async function activateRow(row: SessionRow, element: HTMLElement): Promise<void> {
   if (row.cwd === null) {
     flashRow(element);
     showNotice("该会话没有可打开的目录");
@@ -1015,10 +971,7 @@ function updateHeartbeat(): void {
 }
 
 function clampWindowWidth(width: number): number {
-  return Math.min(
-    WINDOW_MAX_WIDTH,
-    Math.max(WINDOW_MIN_WIDTH, Math.round(width)),
-  );
+  return Math.min(WINDOW_MAX_WIDTH, Math.max(WINDOW_MIN_WIDTH, Math.round(width)));
 }
 
 function getMaxWindowHeight(): number {
@@ -1029,10 +982,7 @@ function getMaxWindowHeight(): number {
 }
 
 function clampWindowHeight(height: number): number {
-  return Math.min(
-    getMaxWindowHeight(),
-    Math.max(WINDOW_MIN_HEIGHT, Math.round(height)),
-  );
+  return Math.min(getMaxWindowHeight(), Math.max(WINDOW_MIN_HEIGHT, Math.round(height)));
 }
 
 function readStoredWindowSize(): StoredWindowSize | null {
@@ -1092,18 +1042,13 @@ async function applyWindowSize(width: number, height: number): Promise<void> {
 }
 
 /** 用户拖拽缩放后更新偏好；程序自动调整的高度不计入用户偏好。 */
-function handleWindowResized(
-  physicalWidth: number,
-  physicalHeight: number,
-): void {
+function handleWindowResized(physicalWidth: number, physicalHeight: number): void {
   const scale = window.devicePixelRatio || 1;
   const width = physicalWidth / scale;
   const height = physicalHeight / scale;
 
-  const widthChanged =
-    Math.abs(width - lastAppliedWindowWidth) > WINDOW_SIZE_EPSILON;
-  const heightChanged =
-    Math.abs(height - lastAppliedWindowHeight) > WINDOW_SIZE_EPSILON;
+  const widthChanged = Math.abs(width - lastAppliedWindowWidth) > WINDOW_SIZE_EPSILON;
+  const heightChanged = Math.abs(height - lastAppliedWindowHeight) > WINDOW_SIZE_EPSILON;
   if (!widthChanged && !heightChanged) {
     return;
   }
@@ -1128,9 +1073,7 @@ function handleWindowResized(
   }, WINDOW_RESIZE_SETTLE_MS);
 }
 
-function parseResizeDirection(
-  value: string | undefined,
-): ResizeDirection | null {
+function parseResizeDirection(value: string | undefined): ResizeDirection | null {
   if (value === undefined) {
     return null;
   }
@@ -1144,9 +1087,7 @@ function setupResizeHandles(): void {
     return;
   }
 
-  for (const handle of resizeLayerElement.querySelectorAll<HTMLElement>(
-    ".resize-handle",
-  )) {
+  for (const handle of resizeLayerElement.querySelectorAll<HTMLElement>(".resize-handle")) {
     const direction = parseResizeDirection(handle.dataset.resizeDirection);
     if (direction === null) {
       continue;
@@ -1167,9 +1108,7 @@ function setupResizeHandles(): void {
 
 async function applyInitialWindowSize(): Promise<void> {
   const currentHeight = Math.max(WINDOW_MIN_HEIGHT, window.innerHeight);
-  const height = clampWindowHeight(
-    Math.min(currentHeight, preferredWindowHeight),
-  );
+  const height = clampWindowHeight(Math.min(currentHeight, preferredWindowHeight));
   await applyWindowSize(preferredWindowWidth, height);
 
   try {
@@ -1188,27 +1127,15 @@ function measureContentHeight(): number {
   // scrollHeight 至少等于当前可视高度，无法用于收缩；改为累加行高并补上列表内边距
   const listStyle = window.getComputedStyle(listElement);
   const listPadding =
-    Number.parseFloat(listStyle.paddingTop) +
-    Number.parseFloat(listStyle.paddingBottom);
+    Number.parseFloat(listStyle.paddingTop) + Number.parseFloat(listStyle.paddingBottom);
   // 行高可能带小数（如 50.43px），offsetHeight 会逐行截断，累计后窗口偏矮约 2px，
   // 悬停出现滚动条；这里取小数高度并向上取整，保证内容恰好不溢出
   const listHeight =
     [...listElement.children].reduce((sum, child) => {
-      return (
-        sum +
-        (child instanceof HTMLElement
-          ? child.getBoundingClientRect().height
-          : 0)
-      );
+      return sum + (child instanceof HTMLElement ? child.getBoundingClientRect().height : 0);
     }, 0) + listPadding;
 
-  return Math.ceil(
-    PANEL_BORDER_HEIGHT +
-      headerHeight +
-      listHeight +
-      errorHeight +
-      footerGapHeight,
-  );
+  return Math.ceil(PANEL_BORDER_HEIGHT + headerHeight + listHeight + errorHeight + footerGapHeight);
 }
 
 function measureSettingsHeight(): number {
@@ -1231,9 +1158,7 @@ async function resizeWindowToContent(force = false): Promise<void> {
     return;
   }
 
-  const contentHeight = isSettingsOpen
-    ? measureSettingsHeight()
-    : measureContentHeight();
+  const contentHeight = isSettingsOpen ? measureSettingsHeight() : measureContentHeight();
   // 用户拖拽的高度是可撑开的上限，内容不足时仍收缩到内容高度
   const maxHeight = Math.min(preferredWindowHeight, getMaxWindowHeight());
   const desiredHeight = clampWindowHeight(Math.min(contentHeight, maxHeight));
@@ -1329,16 +1254,12 @@ async function resetAllSettings(): Promise<void> {
       { label: "开机自启", run: setAutoStart(defaults.autoStart) },
       {
         label: "全局快捷键",
-        run: setGlobalShortcut(
-          defaults.shortcut === "" ? null : defaults.shortcut,
-        ),
+        run: setGlobalShortcut(defaults.shortcut === "" ? null : defaults.shortcut),
       },
     ];
     const results = await Promise.allSettled(tasks.map((task) => task.run));
     const failures = results.flatMap((result, index) =>
-      result.status === "rejected"
-        ? [`${tasks[index].label}（${toMessage(result.reason)}）`]
-        : [],
+      result.status === "rejected" ? [`${tasks[index].label}（${toMessage(result.reason)}）`] : [],
     );
     if (failures.length > 0) {
       throw new Error(failures.join("；"));
@@ -1546,20 +1467,30 @@ if (
   import.meta.env.DEV &&
   ["1", "settings"].includes(
     new URLSearchParams(window.location.search).get("settings") ??
-      (new URLSearchParams(window.location.search).get("theme") === "1"
-        ? "1"
-        : ""),
+      (new URLSearchParams(window.location.search).get("theme") === "1" ? "1" : ""),
   )
 ) {
   setSettingsOpen(true);
 }
 
 updateHeartbeat();
+// 窗口隐藏 / 最小化时暂停轮询，恢复可见后立即刷新一次。
 setInterval(() => {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
   updateHeartbeat();
 }, HEARTBEAT_INTERVAL_MS);
 setInterval(() => {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
   void refresh();
 }, REFRESH_INTERVAL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void refresh();
+  }
+});
 
 void refresh();

@@ -186,17 +186,9 @@ function createSegmentedControl<T extends string>(
   return group;
 }
 
-function syncSegmentedControl<T extends string>(
-  group: HTMLElement,
-  selected: T,
-): void {
-  for (const button of group.querySelectorAll<HTMLButtonElement>(
-    "button[data-value]",
-  )) {
-    button.setAttribute(
-      "aria-pressed",
-      String(button.dataset.value === selected),
-    );
+function syncSegmentedControl<T extends string>(group: HTMLElement, selected: T): void {
+  for (const button of group.querySelectorAll<HTMLButtonElement>("button[data-value]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.value === selected));
   }
 }
 
@@ -306,14 +298,9 @@ export function mountSettingsPanel(
   const appearanceSection = createSection("外观与提醒");
 
   const themeRow = createSettingRow("主题");
-  const themeControl = createSegmentedControl(
-    "主题",
-    THEME_OPTIONS,
-    initial.theme,
-    (theme) => {
-      setTheme(theme);
-    },
-  );
+  const themeControl = createSegmentedControl("主题", THEME_OPTIONS, initial.theme, (theme) => {
+    setTheme(theme);
+  });
   themeRow.row.append(themeControl);
   appearanceSection.append(themeRow.row);
 
@@ -374,14 +361,9 @@ export function mountSettingsPanel(
   // ============ 系统与行为 ============
   const systemSection = createSection("系统与行为");
 
-  const autoStartRow = createSwitchRow(
-    "开机自启",
-    initial.autoStart,
-    !IS_TAURI,
-    (enabled) => {
-      void applyAutoStart(enabled);
-    },
-  );
+  const autoStartRow = createSwitchRow("开机自启", initial.autoStart, !IS_TAURI, (enabled) => {
+    void applyAutoStart(enabled);
+  });
   systemSection.append(autoStartRow.row);
 
   const closeToTrayRow = createSwitchRow(
@@ -508,10 +490,7 @@ export function mountSettingsPanel(
     try {
       await setGlobalShortcut(shortcut === "" ? null : shortcut);
       setShortcutSetting(shortcut);
-      showStatus(
-        shortcut === "" ? "已清除全局快捷键" : `已注册 ${shortcut}`,
-        false,
-      );
+      showStatus(shortcut === "" ? "已清除全局快捷键" : `已注册 ${shortcut}`, false);
     } catch (error) {
       // 注册失败时 Rust 会恢复旧快捷键，输入框同步回已生效的值
       shortcutInput.value = getSettings().shortcut;

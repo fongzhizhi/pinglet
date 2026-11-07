@@ -34,11 +34,7 @@ export const PANEL_TRANSPARENCY_MIN = 0;
 export const PANEL_TRANSPARENCY_MAX = 0.7;
 export const PANEL_TRANSPARENCY_STEP = 0.05;
 const DEFAULT_PANEL_TRANSPARENCY = PANEL_TRANSPARENCY_MIN;
-const FONT_SIZES: ReadonlySet<FontSize> = new Set([
-  "small",
-  "standard",
-  "large",
-]);
+const FONT_SIZES: ReadonlySet<FontSize> = new Set(["small", "standard", "large"]);
 
 const DEFAULT_REMINDERS: Reminders = {
   breathing: true,
@@ -203,12 +199,8 @@ export function applyPanelTransparency(transparency: number): void {
 
 /** 限制到滑块范围并吸附到 5% 步进，避免浮点误差影响比较与持久化。 */
 function normalizePanelTransparency(transparency: number): number {
-  const clamped = Math.min(
-    PANEL_TRANSPARENCY_MAX,
-    Math.max(PANEL_TRANSPARENCY_MIN, transparency),
-  );
-  const stepped =
-    Math.round(clamped / PANEL_TRANSPARENCY_STEP) * PANEL_TRANSPARENCY_STEP;
+  const clamped = Math.min(PANEL_TRANSPARENCY_MAX, Math.max(PANEL_TRANSPARENCY_MIN, transparency));
+  const stepped = Math.round(clamped / PANEL_TRANSPARENCY_STEP) * PANEL_TRANSPARENCY_STEP;
   return Math.round(stepped * 100) / 100;
 }
 
@@ -270,36 +262,26 @@ function parseSettings(raw: string | null): Settings {
     const fontSize = value.fontSize;
 
     return {
-      theme:
-        theme === "light" || theme === "dark" ? theme : fallback.theme,
+      theme: theme === "light" || theme === "dark" ? theme : fallback.theme,
       fontSize:
         typeof fontSize === "string" && FONT_SIZES.has(fontSize as FontSize)
           ? (fontSize as FontSize)
           : fallback.fontSize,
       transparency:
-        typeof value.transparency === "number" &&
-        Number.isFinite(value.transparency)
+        typeof value.transparency === "number" && Number.isFinite(value.transparency)
           ? normalizePanelTransparency(value.transparency)
           : fallback.transparency,
       reminders: parseReminders(value.reminders),
       closeToTray:
-        typeof value.closeToTray === "boolean"
-          ? value.closeToTray
-          : fallback.closeToTray,
+        typeof value.closeToTray === "boolean" ? value.closeToTray : fallback.closeToTray,
       clickThrough:
-        typeof value.clickThrough === "boolean"
-          ? value.clickThrough
-          : fallback.clickThrough,
-      autoStart:
-        typeof value.autoStart === "boolean"
-          ? value.autoStart
-          : fallback.autoStart,
+        typeof value.clickThrough === "boolean" ? value.clickThrough : fallback.clickThrough,
+      autoStart: typeof value.autoStart === "boolean" ? value.autoStart : fallback.autoStart,
       shortcut:
         typeof value.shortcut === "string"
           ? value.shortcut.trim().slice(0, SHORTCUT_MAX_LENGTH)
           : fallback.shortcut,
-      pinned:
-        typeof value.pinned === "boolean" ? value.pinned : fallback.pinned,
+      pinned: typeof value.pinned === "boolean" ? value.pinned : fallback.pinned,
     };
   } catch (error) {
     console.warn("pinglet: 解析本地设置失败，已使用默认值", error);

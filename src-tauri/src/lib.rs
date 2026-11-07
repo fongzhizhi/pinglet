@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 #[cfg(target_os = "windows")]
 use sysinfo::{Process, ProcessRefreshKind, UpdateKind};
@@ -44,6 +45,8 @@ const TITLE_TAIL_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const TITLE_SCAN_OVERLAP_BYTES: u64 = 8 * 1024;
 /// 标题展示上限，防止异常 transcript 写入超长字符串。
 const MAX_TITLE_CHARS: usize = 200;
+/// transcript 未找到时的负缓存有效期；新会话的 transcript 可能稍后才落盘。
+const TRANSCRIPT_MISS_CACHE_TTL: Duration = Duration::from_secs(30);
 /// 默认窗口宽度（逻辑像素），与 tauri.conf.json / 前端默认值保持一致。
 const DEFAULT_WINDOW_WIDTH_LOGICAL: f64 = 280.0;
 
@@ -112,6 +115,7 @@ impl CachedTitle {
 }
 
 static TITLE_CACHE: OnceLock<Mutex<HashMap<String, CachedTitle>>> = OnceLock::new();
+static TRANSCRIPT_MISS_CACHE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 /// 当前吸附在哪些边缘；用于拖出时保持迟滞，避免每帧都被吸回。
 #[derive(Clone, Copy, Default)]
@@ -136,7 +140,8 @@ struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            close_to_tray: AtomicBool::new(true),
+            // 与前端默认设置保持一致；启动后前端会用持久化值覆盖。
+            close_to_tray: AtomicBool::new(false),
             click_through: AtomicBool::new(false),
             tray_ready: AtomicBool::new(false),
             show_item: Mutex::new(None),
@@ -148,7 +153,8 @@ impl Default for AppState {
 }
 
 /// 解析 Claude Code 的内部会话文件；字段随版本变化时只需改这里。
-#[tauri::command]
+/// NOTE: 异步命令会在线程池执行，避免文件扫描阻塞主线程。
+#[tauri::command(async)]
 fn list_sessions() -> ListResult {
     let mut rows = Vec::new();
     let mut errors = Vec::new();
@@ -1166,13 +1172,30 @@ fn is_safe_session_id(value: &str) -> bool {
 }
 
 /// 按 sessionId 在 ~/.claude/projects/*/ 下查找 transcript，不硬编码项目 slug 转义规则。
+/// NOTE: 未命中结果缓存一段时间，避免为尚未生成 transcript 的新会话重复扫描目录。
 fn find_transcript(session_id: &str) -> Option<PathBuf> {
+    if let Ok(cache) = transcript_miss_cache().lock() {
+        if let Some(checked_at) = cache.get(session_id) {
+            if checked_at.elapsed() < TRANSCRIPT_MISS_CACHE_TTL {
+                return None;
+            }
+        }
+    }
+
     let projects = projects_dir()?;
     for entry in fs::read_dir(projects).ok()?.flatten() {
         let candidate = entry.path().join(format!("{session_id}.jsonl"));
         if candidate.is_file() {
+            if let Ok(mut cache) = transcript_miss_cache().lock() {
+                cache.remove(session_id);
+            }
             return Some(candidate);
         }
+    }
+
+    if let Ok(mut cache) = transcript_miss_cache().lock() {
+        cache.retain(|_, checked_at| checked_at.elapsed() < TRANSCRIPT_MISS_CACHE_TTL);
+        cache.insert(session_id.to_string(), Instant::now());
     }
     None
 }
@@ -1205,6 +1228,10 @@ fn resolve_session_title(
 
 fn title_cache() -> &'static Mutex<HashMap<String, CachedTitle>> {
     TITLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn transcript_miss_cache() -> &'static Mutex<HashMap<String, Instant>> {
+    TRANSCRIPT_MISS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 读取 transcript 标题；缓存按文件大小与 mtime 失效，增长时只扫描新增区间。

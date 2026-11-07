@@ -34,12 +34,7 @@ export type SessionTooltip = {
 /** 双击会话行时可执行的动作；目前只支持 VSCode 与 CLI 两种入口。 */
 export type SessionAction = "open-vscode" | "open-terminal";
 
-export const BOARD_STATES: readonly BoardState[] = [
-  "blocked",
-  "interrupted",
-  "working",
-  "done",
-];
+export const BOARD_STATES: readonly BoardState[] = ["blocked", "interrupted", "working", "done"];
 
 type StateMeta = {
   label: string;
@@ -115,8 +110,7 @@ export function sortRows(rows: SessionRow[]): SessionRow[] {
   return [...rows].sort((left, right) => {
     const leftState = classify(left);
     const rightState = classify(right);
-    const priorityDiff =
-      STATE_META[leftState].priority - STATE_META[rightState].priority;
+    const priorityDiff = STATE_META[leftState].priority - STATE_META[rightState].priority;
     if (priorityDiff !== 0) {
       return priorityDiff;
     }
@@ -139,10 +133,7 @@ function formatDuration(timestamp: number | null, now: number): string {
     return "—";
   }
 
-  const elapsedSeconds = Math.max(
-    0,
-    Math.floor((now - timestamp) / MILLISECONDS_PER_SECOND),
-  );
+  const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / MILLISECONDS_PER_SECOND));
   if (elapsedSeconds < SECONDS_PER_MINUTE) {
     return "刚刚";
   }
@@ -155,19 +146,13 @@ function formatDuration(timestamp: number | null, now: number): string {
   const elapsedHours = Math.floor(elapsedMinutes / MINUTES_PER_HOUR);
   if (elapsedHours < HOURS_PER_DAY) {
     const remainingMinutes = elapsedMinutes % MINUTES_PER_HOUR;
-    return remainingMinutes === 0
-      ? `${elapsedHours}h`
-      : `${elapsedHours}h ${remainingMinutes}m`;
+    return remainingMinutes === 0 ? `${elapsedHours}h` : `${elapsedHours}h ${remainingMinutes}m`;
   }
 
   return `${Math.floor(elapsedHours / HOURS_PER_DAY)}d`;
 }
 
-export function describeDuration(
-  row: SessionRow,
-  state: BoardState,
-  now: number,
-): string {
+export function describeDuration(row: SessionRow, state: BoardState, now: number): string {
   const duration = formatDuration(row.statusUpdatedAt, now);
 
   switch (state) {
@@ -196,10 +181,7 @@ export function entrypointLabel(entrypoint: string | null): string | null {
     return null;
   }
   const normalized = entrypoint.toLowerCase();
-  if (
-    normalized.includes("vscode") ||
-    normalized.includes("visual studio code")
-  ) {
+  if (normalized.includes("vscode") || normalized.includes("visual studio code")) {
     return "vs-code";
   }
   if (normalized === "claude" || normalized.includes("cli")) {
@@ -230,12 +212,8 @@ function formatTimestamp(timestamp: number | null): string {
   return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
 }
 
-export function buildTooltip(
-  row: SessionRow,
-  state: BoardState,
-): SessionTooltip {
-  const aliveLabel =
-    row.alive === false ? "已退出" : row.alive === null ? "未知" : "运行中";
+export function buildTooltip(row: SessionRow, state: BoardState): SessionTooltip {
+  const aliveLabel = row.alive === false ? "已退出" : row.alive === null ? "未知" : "运行中";
   const entrypoint = entrypointLabel(row.entrypoint);
   const lines = [
     `目录: ${row.cwd ?? "未知目录"}`,

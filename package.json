@@ -1,20 +1,47 @@
 {
   "name": "pinglet",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.3.1",
+  "description": "Claude Code 会话状态看板",
+  "author": "fongzhizhi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fongzhizhi/pinglet.git"
+  },
+  "homepage": "https://github.com/fongzhizhi/pinglet#readme",
+  "bugs": {
+    "url": "https://github.com/fongzhizhi/pinglet/issues"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.14.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
     "vite": "^8.0.16",
-    "typescript": "~6.0.3"
+    "vitest": "^5.1.0"
   }
 }

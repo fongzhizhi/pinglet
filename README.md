@@ -1,157 +1,108 @@
 # Pinglet
 
-> 轻量常驻、可按需置顶的 Claude Code 会话状态看板：聚合所有活跃交互式会话，用四种状态、暗/亮主题和轻量提醒帮你第一时间发现“待处理”。
+> 轻量常驻的 Claude Code 会话状态看板。
 
-## 定位
+<p align="center">
+  <img src="docs/images/screenshot.png" alt="Pinglet 界面截图" width="320">
+</p>
 
-Pinglet（原名 ping）是一个独立的 Tauri 2 桌面小工具，只读 Claude Code 的本地会话状态文件与 transcript 标题记录，不联网、不调用 Claude API、不修改任何 Claude 配置或会话数据。UI 与功能以 [pinglet-v1.2.md](docs/plans/pinglet-v1.2.md) 与 [pinglet-v1.3.md](docs/plans/pinglet-v1.3.md) 为设计定稿；背景与实现过程见 [pinglet.md](docs/plans/pinglet.md)，Logo 状态联动见 [pinglet-logo.md](docs/plans/pinglet-logo.md)。
 
-## 数据来源
+Pinglet 把本机所有活跃的 Claude Code 交互式会话聚合成一个小巧的置顶窗口，用「待处理 / 已中断 / 进行中 / 已完成」四种状态告诉你哪个会话正在等你。它只读取本地会话状态文件与 transcript 标题记录，不联网、不调用 Claude API，也不修改任何 Claude 配置。
 
-```
-%USERPROFILE%\.claude\sessions\*.json
-```
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows11&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)
+![CI](https://github.com/fongzhizhi/pinglet/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-- 只匹配 `*.json`，忽略 `<pid>.<hash>.key` 等侧车文件
-- 只解析白名单字段：`pid` / `cwd` / `name` / `nameSource` / `sessionId` / `kind` / `entrypoint` / `status` / `statusUpdatedAt` / `updatedAt`
-- 错误信息只包含文件名与失败原因，不输出 JSON 内容（文件里的 `messagingSocketPath` 等字段不进入日志）
-- 标题补充读取：仅当 `nameSource != "hook"` 时，按 `sessionId` 在 `~/.claude/projects/*/<sessionId>.jsonl` 中查找 transcript，只读头尾窗口里的 `custom-title` / `ai-title` 记录；不读取消息正文，不展示 Prompt 内容，不写回 Claude 文件
-- transcript 按文件大小与 mtime 缓存；文件增长时只增量扫描新增区间，避免 2 秒轮询反复读取几十 MB 的文件
-- 不写 Claude 的任何配置或会话数据、不联网、不调用 Claude API
-- 只显示 `kind = interactive` 的会话；后台任务、daemon 等不进入看板
+## 功能
 
-## 状态
+- **四态看板**：待处理置顶，已中断独立标色；等得越久越靠前，异常会话一眼可见。
+- **状态提醒**：待处理 / 已中断突变时触发呼吸灯、音效与窗口抖动；进行中 → 已完成有轻量完成提示。
+- **一键回到会话**：双击会话行（或按 Enter）激活对应的 VSCode 窗口或 Git Bash 终端。
+- **常驻但不打扰**：窗口置顶、无边框、高度随内容自适应，拖到屏幕边缘会自动吸附。
+- **按需定制**：暗 / 亮主题、三档字号、面板透明度、提醒方式、开机自启与全局快捷键（默认 `Alt+Shift+P`）。
+- **只读与隐私**：只解析白名单字段；transcript 只读标题记录，不读取消息正文。
 
-看板收敛为四种状态，文案统一为三字：
+## 下载与安装
 
-| 看板状态 | 判定依据                                                                       | 说明                                                  |
-| -------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| 待处理   | `waiting` / `blocked`                                                          | 等待用户输入或权限确认，红色置顶                      |
-| 已中断   | 进程已退出，或 `failed` / `crashed` / `stopped`                                | 异常退出、报错崩溃或被手动强行停止                    |
-| 进行中   | `busy` / `shell` / `working` / `starting` / `running` / `resuming` / `adopted` | AI 正在思考或执行命令；未知状态且进程存活时也按此兜底 |
-| 已完成   | `idle` / `done`                                                                | 上一轮任务结束，等待下一个 Prompt                     |
+前往 [Releases](https://github.com/fongzhizhi/pinglet/releases) 下载最新安装包；若尚无发布版本，可按[构建说明](docs/build.md)自行打包。
 
-- 正常退出会删除会话文件，残留的 `alive = false` 记录归为「已中断」。
-- 排序：待处理 > 已中断 > 进行中 > 已完成。待处理 / 进行中按开始时间升序（等得久的在前），已中断 / 已完成按最近更新倒序。
-- 未知状态不显示“未知”，进程存活时兜底为「进行中」；解析失败或字段缺失不会导致崩溃。
-- 标题优先级：`nameSource = "hook"` 的 `name`（用户标题）> transcript 中最后一条 `custom-title` > 最后一条 `ai-title` > `nameSource = "derived"` 时用目录名 > 内部名 / 「未命名会话」。不再把 `demo-alpha-3f` 这类内部 slug 当作标题展示。
+- 系统要求：Windows 10 / 11（需要 WebView2 Runtime，Windows 11 已内置）
+- 安装包：`Pinglet_<version>_x64-setup.exe`
+- 便携版：从 Release 下载 `Pinglet_<version>_x64-portable.zip`，解压后直接运行；也可自行构建 `src-tauri/target/release/pinglet.exe`
 
-## 界面与交互
+首次启动后窗口出现在屏幕右上角，默认始终置顶。
 
-- **顶栏**：左侧极简 logo（三层图形静态映射 待处理 / 已中断 / 进行中，未激活图层保留状态色但更淡；悬停可查看数据刷新状态）；汇总胶囊按 待处理 > 已中断 > 进行中 的顺序显示非零数量（如 `1 待处理`、`2 已中断`、`3 进行中`，文字跟随对应状态色），没有进行中且无异常会话时只显示 logo。
-- **右侧按钮**：图钉、设置、关闭。窗口始终置顶，图钉只切换顶栏是否可拖动：按钮文案表示点击后进入的模式——拖动模式下显示「固定模式」，固定模式下显示「拖动模式」；图标亮 = 固定且不可拖动。关闭按钮随设置变化：开启「关闭时最小化到托盘」时显示最小化图标与「最小化」文案，关闭时显示 ✕ 与「退出」文案。
-- **会话行**：两行布局——第一行 `状态灯 + 状态字 + 会话标题 + 时间状态`，第二行 `目录名 + vs-code / cli 环境标签`，整体右对齐；目录名在前，入口标签在后，两者同为标签样式。标题超出省略，目录只显示文件夹名。
-- **标签配色**：标签文字使用实色（不再整体降透明度）。目录按完整路径哈希稳定分配低饱和色板槽位——同一目录同色、不同目录尽量不同色；同时可见目录超过 8 个时循环复用色板。入口标签固定三色：`vs-code` 蓝、`cli` 紫、其他中性色。色板随亮 / 暗主题切换，饱和度低于四态语义色，避免压过状态信息。
-- **悬浮提示**：悬停约 1.5 秒后弹出，展示完整路径、完整标题、状态、入口、进程与最后更新时间；标题与内部名不同时补充内部名，并展示会话 ID，便于区分同目录多会话。底部提示「双击激活会话窗口」；双击会话行后立即收起，不再弹出。**不读取消息正文，因此不展示 Prompt 内容**。
-- **双击 / Enter**：仅入口为 `vs-code` / `cli` 的会话支持。VSCode 会话会打开目录并主动将已存在的 VSCode 窗口切到前台，启动时会剔除开发环境继承的 `ELECTRON_RUN_AS_NODE`（否则 `Code.exe` 会被 Electron 当作 Node 运行）；CLI 会话先沿进程父链识别是否运行在 VSCode 集成终端中——是则激活对应的 VSCode 窗口，否则按启动目录或终端标题聚焦已有 Git Bash 窗口；都匹配不到时行内闪烁并在底部提示，不会新开窗口。其他入口仅行内闪烁并提示不支持。底部提示保留约 2 秒。无右键菜单。
-- **心跳**：不再常驻面板右下角。悬停顶栏 logo 约 1.5 秒后弹出提示，第一行为品牌名 `Pinglet`，第二行为心跳圆点 + `刷新于 HH:mm:ss`；绿色正常、黄色 > 5s 未更新、红色 > 15s 未更新，尚无数据时显示「尚未刷新」。
+## 使用
 
-## 主题与设置
+- 悬停会话行约 1.5 秒，查看完整路径、状态、入口、进程与会话 ID。
+- 双击或按 Enter 激活会话：VSCode 会话会切到对应窗口；CLI 会话会聚焦其所在的 VSCode 集成终端或 Git Bash 窗口。
+- 顶栏图钉切换「拖动 / 固定」模式，齿轮打开设置；关闭按钮按设置直接退出或最小化到托盘。
+- 托盘右键提供「显示 / 鼠标穿透 / 设置 / 退出」。开启鼠标穿透后，用全局快捷键或托盘左键恢复。
+- 更完整的交互、窗口行为与已知限制见 [使用说明](docs/usage.md)。
 
-设置只写入本机 WebView 的 `localStorage`（`pinglet.settings.v1`），不会写 Claude 配置，也不为“主题”增加 Rust command。根节点 `data-theme="dark" | "light"` 切换语义 CSS 变量：
+## 设置
 
-| 状态   | 暗色      | 亮色      |
-| ------ | --------- | --------- |
-| 待处理 | `#FF4D4F` | `#D93025` |
-| 已中断 | `#FAAD14` | `#D97706` |
-| 进行中 | `#2ED573` | `#059669` |
-| 已完成 | `#787878` | `#9CA3AF` |
+设置只保存在本机 WebView 的 `localStorage`，不会写入 Claude 配置。
 
-- 暗色背景 `#18181B`，亮色背景 `#FFFFFF`；设置面板与 Tooltip 为不透明纯色，主面板背景可通过透明度滑块调整；均不使用 `backdrop-filter`。
-- 默认配置：暗色主题、标准字号、面板透明度 0%（完全不透明）、开启呼吸灯、音效与窗口抖动、关闭「点击关闭时最小化到托盘」（点击关闭直接退出）、拖动模式（窗口置顶、顶栏可拖动）、关闭鼠标穿透、关闭开机自启、快捷键 `Alt+Shift+P`。
-- 字号三档：小 `13px` / 标准 `14px` / 大 `15px`。通过 `--font-size-base` 联动 Logo、图钉 / 设置 / 关闭图标、状态圆点、心跳点、开关与按钮尺寸，切换后自动按内容重算窗口高度。
-- 透明度：设置面板提供 0%–70% 滑块（步进 5%，默认 0%，即完全不透明），数值越大面板背景越透，文字、图标与状态色保持不透明；设置面板本身不透明，避免调节时文字互相干扰。开启鼠标穿透后可调高透明度，让面板半透明地浮在下方窗口之上；设置随其他偏好保存在 `localStorage`。
-- 窗口宽度、高度与字号均保存在本机 `localStorage`（窗口尺寸键为 `pinglet.window.v1`）。「恢复默认」会清空全部本地设置、恢复默认系统项，把窗口宽度重置为 `280px`、字号 / 主题 / 透明度 / 提醒恢复默认，并刷新页面。
-- 提醒模式多选：呼吸灯 / 音效 / 窗口抖动；选择「无」会清空其他三项。勾选任一生效项时立即演示对应效果（呼吸灯演示闪烁三次，约 3.3 秒；抖动持续约 0.6 秒、来回三次）。提醒触发分两档：待处理 / 已中断的状态突变触发强提醒——呼吸灯按对应状态色闪烁三次，音效响一次，窗口抖动来回三次；进行中 → 已完成触发完成提醒——呼吸灯用进行中绿色闪烁一次，音效响一次，窗口抖动一次（约 0.3 秒）。音效与抖动均受各自开关控制。启动时已存在的会话状态不补闪。
-- 鼠标穿透：在设置面板中开启后，**等面板关闭才真正生效**，避免面板立刻失去点击能力。生效后窗口不接收鼠标事件，点击会落到下方窗口；按全局快捷键（默认 `Alt+Shift+P`）或点击托盘左键，会先关闭穿透再显示 / 聚焦窗口，也可右键托盘图标 →「鼠标穿透」取消勾选。设置面板、托盘勾选与快捷键切换三方同步。
-- 开机自启与关闭行为通过 Tauri 插件与 Rust command 实现；全局快捷键默认 `Alt+Shift+P`，可聚焦输入框后重新录制，Backspace 清除。
-- 关于区显示 `Pinglet v1.3.0` 与开发者信息，底部提供「恢复默认」与「退出应用」；恢复默认会同时重置关闭行为、鼠标穿透、开机自启与快捷键（窗口始终保持置顶）。
-- 设置面板顶部提供「← 返回」按钮，点击即可收起面板，与再次点击齿轮等效。
+| 项目 | 默认值 |
+| --- | --- |
+| 主题 | 暗色 |
+| 字号 | 标准（14px） |
+| 面板透明度 | 0%（完全不透明） |
+| 提醒 | 呼吸灯 / 音效 / 窗口抖动全开 |
+| 关闭行为 | 直接退出（不驻留托盘） |
+| 开机自启 | 关闭 |
+| 全局快捷键 | `Alt+Shift+P` |
+| 鼠标穿透 | 关闭 |
 
-## 窗口行为
+设置面板底部提供「恢复默认」，会清空全部本地设置并刷新页面。
 
-- 默认宽度 `280px`（即最小宽度），可拖拽调整：宽度 `280–600px`，高度 `200–800px`。四边 5px、四角 10px 透明热区，按下后交给系统执行缩放拖拽。禁用系统最大化，双击顶栏只会开始拖动，不会把窗口放大。
-- 高度随内容自适应：内容变多时撑开窗口，内容减少时自动收缩；未拖拽过时默认增长上限为 `320px`（标准字号约 5 行会话），用户拖拽过的高度作为上限。超过上限时列表内部滚动，而不是继续撑高窗口。自动调整遇到用户拖拽后 500ms 内暂停，避免与系统拖拽互相拉扯。
-- 宽度、高度偏好持久化到 `localStorage`；启动恢复宽度后若窗口越出工作区，会自动向左上推回可见范围。
-- 滚动条默认隐藏，仅在列表 hover 或实际滚动时显示 4px 细滚动条。
-- 无边框、圆角、跳过任务栏；窗口始终置顶，点击非面板区域不会把它压到其他窗口后面。拖动模式可拖动顶栏，固定模式锁定位置。窗口透明用于圆角与面板背景透明度；默认面板背景不透明。拖动到屏幕边缘约 10px 内时自动吸附；吸附后需向外拖动约 24px 才解除，避免小步拖动被反复拉回边缘。
-- 托盘右键菜单提供四项：「显示」（勾选表示窗口当前可见，点击切换显隐）、「鼠标穿透」（勾选表示穿透中）、「设置」（显示窗口并打开设置面板，穿透中会先关闭穿透）、「退出」。关闭到托盘后可通过托盘菜单或全局快捷键重新显示。穿透开启时，全局快捷键与托盘左键优先恢复可点击状态（关闭穿透并显示 / 聚焦窗口）。设置中关闭「最小化到托盘」后，点击 X 会直接退出应用。
+## 数据与隐私
 
-## 运行与构建
+- 只读取 `%USERPROFILE%\.claude\sessions\*.json` 和 `~/.claude/projects/*/<sessionId>.jsonl` 中的标题记录。
+- 会话文件只解析白名单字段：`pid` / `cwd` / `name` / `nameSource` / `sessionId` / `kind` / `entrypoint` / `status` / `statusUpdatedAt` / `updatedAt`。
+- transcript 只读头尾窗口里的 `custom-title` / `ai-title`，不读取消息正文、不展示 Prompt、不写回任意 Claude 文件。
+- 错误信息只包含文件名与失败原因，不输出 JSON 内容；应用不联网、不调用 Claude API。
+
+## 开发
 
 ```bash
 npm install
-npm run tauri dev      # 开发（前端热更新 + 桌面窗口）
-npm run tauri build    # 打包 NSIS 安装包（UI 稳定后再执行）
+npm run tauri dev    # 桌面开发（前端热更新 + Tauri 窗口）
+npm run dev          # 浏览器预览 UI（http://localhost:1420）
+npm test             # Vitest 单元测试
+npm run lint         # ESLint
+npm run format       # Prettier 格式化
+npm run build        # 类型检查 + 前端构建
+npm run tauri build -- --bundles nsis   # 打包 NSIS 安装包
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试
 ```
 
-前置依赖：Rust（MSVC 工具链）、Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK、WebView2 Runtime。
+前置依赖：Rust（MSVC 工具链）、Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK、WebView2 Runtime。打包、图标生成与常见问题见 [构建说明](docs/build.md)。推送到 `master` 或提交 PR 会触发 `.github/workflows/ci.yml`；推送 `v*` 标签会生成草稿 Release。
 
-### 重新编译安装包
-
-1. 先退出正在运行的 Pinglet（托盘右键 → 退出），否则 release 下的 `pinglet.exe` 被占用，构建会报 `os error 5`。
-2. 在仓库根目录执行：
-
-   ```bash
-   npm install                          # 仅首次或依赖有变化时
-   npm run tauri build -- --bundles nsis
-   ```
-
-3. 产物：
-   - 安装包：`src-tauri/target/release/bundle/nsis/Pinglet_<版本>_x64-setup.exe`
-   - 便携版：`src-tauri/target/release/pinglet.exe`
-
-NSIS 工具集缓存在 `%LOCALAPPDATA%\tauri\NSIS`，缓存存在时打包不再访问 GitHub。若缓存被清理且 GitHub 直连超时，可手动下载 `nsis-3.13.zip`（SHA1 `db14f8af2ea346b786c6ae19343f61aaf5e09b8e`）和 `nsis_tauri_utils.dll`（SHA1 `75197fee3c6a814fe035788d1c34ead39349b860`）放入该目录，再重新执行构建。
-
-### 浏览器预览 UI
-
-调试布局、配色、字号时不必每次都看 Tauri 窗口：
-
-```bash
-npm run dev            # 只起 Vite，不启动桌面窗口
-# 浏览器打开 http://localhost:1420
+```text
+src/                 前端：轮询、四态看板、设置面板、Tauri IPC 封装
+src-tauri/src/       Rust：会话读取、标题解析、窗口 / 托盘 / 快捷键 / 激活会话
+assets/app-icon.svg  应用图标唯一源文件
+docs/                使用说明、构建说明与设计文档
 ```
 
-- 非 Tauri 环境自动加载 `src/mock-sessions.ts` 的模拟数据，覆盖四态、未知状态兜底与死进程残留
-- 页面按 280px 宽度居中显示（隐藏缩放热区），标题栏带“浏览器预览”标记
-- 仅 Tauri 提供的能力（拖拽、关闭、托盘、快捷键、双击激活 VSCode / Git Bash）在浏览器中会以提示代替
-- 开发环境可用 `http://localhost:1420/?settings=1` 直接打开设置面板
+## 文档
 
-### 图标
-
-- 图形为「信号点 + 两道波纹」：中心圆点、内圈波纹、外圈波纹分别静态映射 进行中 / 已中断 / 待处理，颜色取自对应状态色；未激活图层保留对应状态色，仅以低透明度呈现。Logo 只做静态高亮，不含任何闪烁动画，动态提醒仍由窗口呼吸灯负责。
-- 顶栏 logo 是 [index.html](index.html) 内的内联 SVG（1024 网格，无圆底背景，几何与 [assets/app-icon.svg](assets/app-icon.svg) 一致），三层图形通过 `.active` 类切换状态色，过渡时长 0.3 秒。
-- 应用 / 托盘 / 安装包图标以 [assets/app-icon.svg](assets/app-icon.svg) 为唯一源文件（1024×1024，同一图形加深色圆底），修改后运行 `npx tauri icon assets/app-icon.svg` 重新生成 `src-tauri/icons/`。仓库只保留 `bundle.icon` 引用的 5 个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico`、`icon.icns`），其余尺寸、Store 图标与 `android/`、`ios/` 目录在生成后删除。托盘图标取自默认窗口图标，无需单独配置；生成物不要手工编辑。
-
-## 结构
-
-```
-仓库根目录
-  assets/
-    app-icon.svg        # 应用 / 托盘图标源文件（顶栏内联 SVG 与之同形）
-  index.html            # 窗口骨架
-  src/
-    main.ts             # 2 秒轮询 + 行渲染 + 汇总 + 心跳 + 提醒 + 窗口尺寸/缩放/越界回拉
-    session-state.ts    # 四态判定、排序、时长、目录名与 tooltip 文案
-    settings.ts         # localStorage 设置模型、主题/字号/透明度变量应用
-    settings-panel.ts   # 设置面板：主题/字号/透明度/通知/自启/关闭行为/鼠标穿透/快捷键/恢复默认/关于
-    system.ts           # Tauri IPC 封装（窗口尺寸与缩放、会话列表、系统集成）
-    mock-sessions.ts    # 浏览器预览用模拟数据（仅 dev + 非 Tauri）
-    styles.css          # 布局、暗/亮主题 CSS 变量、字号联动、缩放热区、设置与提示样式
-  src-tauri/
-    src/lib.rs          # list_sessions（含标题解析与缓存）/ activate_session（含 VSCode / Git Bash 窗口激活）/ 托盘与穿透 / 吸附 / 系统命令
-    tauri.conf.json     # 280px 默认宽、280–600 × 200–800 可缩放、透明、无边框、始终置顶、跳过任务栏
-    capabilities/       # 最小权限（窗口 close/set-size/drag/resize/position/monitor）
-```
+- [使用说明](docs/usage.md)：界面、交互、设置与窗口行为
+- [构建与打包](docs/build.md)：环境准备、NSIS 打包、图标生成
+- [设计定稿 v1.3](docs/plans/pinglet-v1.3.md) / [v1.2](docs/plans/pinglet-v1.2.md)
+- [会话标题数据源说明](docs/session-title-source.md)
+- [开发约定](CLAUDE.md)
 
 ## 已知限制
 
-- Prompt 内容不在 `sessions/*.json` 中；Pinglet 只读取 transcript 的标题记录，不读取消息正文，因此 tooltip 不包含提问内容。
-- 尚无任何标题的新会话（`nameSource = "derived"` 且 transcript 中无 `custom-title` / `ai-title`）会回退显示目录名；同目录多个未命名会话的标题会相同，可用 tooltip 里的内部名 / 会话 ID 区分，或通过 session-keeper / `/rename` 设置标题。
-- VSCode 会话会按目录名匹配并聚焦已打开该目录的窗口；若目录尚未在 VSCode 中打开，则新开窗口后聚焦。CLI 会话运行在 VSCode 集成终端中时，按会话进程的父链找到所属 VSCode 主进程，再用 cwd 的各级目录名匹配窗口标题；标题匹配不到且该进程只有一个窗口时直接激活，多个窗口且都无法匹配则提示无法定位。其余 CLI 会话先按 Git Bash 的启动目录（`--cd`）匹配，再按 Claude Code 写入的终端标题匹配；终端既不是 VSCode 也不是 Git Bash（如 Windows Terminal）、启动时没有 `--cd` 且标题被其他程序覆盖、或窗口内手动 `cd` 后标题也被覆盖时，会提示无法激活，不会新开窗口。
-- 鼠标穿透开启后窗口不接收鼠标事件，需通过全局快捷键、托盘左键或托盘菜单「鼠标穿透」恢复；若全局快捷键注册失败且托盘不可用，将无法从窗口内部关闭穿透。
-- 托盘、开机自启、全局快捷键、边缘吸附、鼠标穿透等系统集成需在真实桌面环境中验收。
+- 不读取消息正文，因此悬浮提示不展示 Prompt 内容；无标题的新会话回退显示目录名。
+- CLI 会话仅支持激活 VSCode 集成终端或 Git Bash 窗口；Windows Terminal 等终端未支持。
+- 鼠标穿透开启后窗口不接收点击，需通过全局快捷键或托盘菜单恢复。
+- 当前安装包未做代码签名，首次运行可能触发 Windows SmartScreen 提示。
 
-## 参考
+## License
 
-- [claude-skill-lab](https://github.com/fongzhizhi/claude-skill-lab)：Pinglet 的孵化仓库，Claude Code 扩展能力（skill / agent / command / hook / workflow）的个人研发工作台。
+[MIT](LICENSE)
