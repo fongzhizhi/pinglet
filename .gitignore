@@ -1,0 +1,38 @@
+# 构建产物
+node_modules
+dist
+dist-ssr
+src-tauri/target/
+src-tauri/gen/
+*.local
+
+# 日志
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 本地 UI 截图
+.shots/
+
+# 生成的图标（只保留 bundle.icon 引用的 5 个文件）
+src-tauri/icons/android/
+src-tauri/icons/ios/
+src-tauri/icons/64x64.png
+src-tauri/icons/Square*.png
+src-tauri/icons/StoreLogo.png
+src-tauri/icons/icon.png
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

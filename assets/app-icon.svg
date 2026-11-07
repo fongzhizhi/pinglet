@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- 与 index.html 顶栏 logo 同一图形（16 网格 × 64）：信号点 + 两道波纹，寓意轻巧的探测信号 -->
+  <circle cx="512" cy="512" r="456" fill="#18181B" />
+  <path d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1" fill="none" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="70.4" stroke-linecap="round" />
+  <path d="M311 443.1A230.4 230.4 0 0 1 577.9 630" fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="83.2" stroke-linecap="round" />
+  <circle cx="351" cy="670" r="96" fill="#2ED573" />
+</svg>

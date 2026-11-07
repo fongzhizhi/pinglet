@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Pinglet</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main id="panel" class="panel">
+      <header id="board-header" class="titlebar" data-tauri-drag-region="deep">
+        <div class="brand">
+          <!-- 信号点 + 两道波纹：分别静态映射进行中 / 已中断 / 待处理，几何与 assets/app-icon.svg 一致 -->
+          <svg class="logo" viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true">
+            <path
+              id="logo-pending"
+              class="logo-part"
+              d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1"
+              fill="none"
+              stroke-width="70.4"
+              stroke-linecap="round"
+            />
+            <path
+              id="logo-interrupted"
+              class="logo-part"
+              d="M311 443.1A230.4 230.4 0 0 1 577.9 630"
+              fill="none"
+              stroke-width="83.2"
+              stroke-linecap="round"
+            />
+            <circle id="logo-running" class="logo-part" cx="351" cy="670" r="96" />
+          </svg>
+          <span class="wordmark" aria-hidden="true">pinglet</span>
+          <span id="summary" class="summary" aria-live="polite"></span>
+        </div>
+        <div class="window-actions">
+          <button
+            id="pin-btn"
+            class="icon-btn"
+            type="button"
+            aria-label="固定模式"
+            aria-pressed="false"
+            title="固定模式"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M9.5 2.5l4 4-1.8.9-2.3 2.3-.6 3.1-3.7-3.7 3.1-.6 2.3-2.3z" />
+              <path d="M6.2 9.8L3 13" />
+            </svg>
+          </button>
+          <button
+            id="settings-btn"
+            class="icon-btn"
+            type="button"
+            aria-label="设置"
+            aria-expanded="false"
+            title="设置"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+              />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+          <button
+            id="close-btn"
+            class="icon-btn is-minimize"
+            type="button"
+            aria-label="最小化"
+            title="最小化"
+          >
+            <svg
+              id="close-icon"
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              aria-hidden="true"
+              hidden
+            >
+              <path d="M4 4l8 8M12 4l-8 8" />
+            </svg>
+            <svg
+              id="minimize-icon"
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M4 8h8" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="board-view" class="board-view">
+        <div id="session-list" class="session-list" role="list"></div>
+        <div id="error-bar" class="error-bar" role="alert"></div>
+
+        <!-- 仅保留底部留白，心跳信息改由 logo 悬浮提示展示 -->
+        <div class="footer-gap" aria-hidden="true"></div>
+      </div>
+
+      <div id="settings-backdrop" class="settings-backdrop" hidden></div>
+      <section
+        id="settings-panel"
+        class="settings-panel"
+        aria-label="设置"
+        hidden
+      ></section>
+    </main>
+
+    <div id="resize-layer" class="resize-layer" aria-hidden="true">
+      <div class="resize-handle" data-resize-direction="North"></div>
+      <div class="resize-handle" data-resize-direction="South"></div>
+      <div class="resize-handle" data-resize-direction="West"></div>
+      <div class="resize-handle" data-resize-direction="East"></div>
+      <div
+        class="resize-handle resize-corner"
+        data-resize-direction="NorthWest"
+      ></div>
+      <div
+        class="resize-handle resize-corner"
+        data-resize-direction="NorthEast"
+      ></div>
+      <div
+        class="resize-handle resize-corner"
+        data-resize-direction="SouthWest"
+      ></div>
+      <div
+        class="resize-handle resize-corner"
+        data-resize-direction="SouthEast"
+      ></div>
+    </div>
+
+    <div id="tooltip" class="tooltip" role="tooltip" hidden>
+      <div id="tooltip-title" class="tooltip-title"></div>
+      <div id="tooltip-body" class="tooltip-body"></div>
+    </div>
+
+    <div id="logo-tooltip" class="tooltip logo-tooltip" role="tooltip" hidden>
+      <div class="tooltip-title">Pinglet</div>
+      <div class="tooltip-status">
+        <span
+          id="heartbeat"
+          class="heartbeat"
+          role="status"
+          aria-label="数据连接状态"
+          data-level="offline"
+        ></span>
+        <span id="heartbeat-text" class="heartbeat-text">尚未刷新</span>
+      </div>
+    </div>
+  </body>
+</html>
