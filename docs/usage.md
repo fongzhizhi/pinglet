@@ -120,6 +120,16 @@
 
 关闭到托盘后可通过托盘菜单或全局快捷键重新显示。穿透开启时，全局快捷键与托盘左键优先恢复可点击状态（关闭穿透并显示 / 聚焦窗口）。设置中关闭「最小化到托盘」后，点击 X 会直接退出应用。
 
+## 常见问题
+
+### VS Code 扩展启动的会话不显示
+
+Pinglet 只能发现写入 `%USERPROFILE%\.claude\sessions\*.json` 的会话。部分版本的 Claude Code VS Code 扩展以非交互方式启动底层 CLI，不写这份注册文件，因此这些会话不会出现在看板上——这是数据源缺失，不是 Pinglet 读取失败。
+
+- 优先把 Claude Code VS Code 扩展升级到最新版，升级后新开的会话会正常写入注册文件。
+- 验证方法：插件会话运行时检查 `%USERPROFILE%\.claude\sessions\` 下是否出现对应 `*.json`；没有就说明注册缺失。
+- 升级后仍不写入时，可改用 VS Code 集成终端直接运行 `claude`（交互模式）。该方式会正常注册，也能被看板双击激活。
+
 ## 已知限制
 
 - Prompt 内容不在 `sessions/*.json` 中；Pinglet 只读取 transcript 的标题记录，不读取消息正文，因此 tooltip 不包含提问内容。

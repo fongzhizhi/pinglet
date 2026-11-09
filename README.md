@@ -98,6 +98,7 @@ docs/                使用说明、构建说明与设计文档
 
 ## 已知限制
 
+- 部分版本的 Claude Code VS Code 扩展以非交互模式启动，不写入 `%USERPROFILE%\.claude\sessions\` 注册文件，其会话不会出现在看板上；请升级扩展，或改用集成终端运行 `claude`。
 - 不读取消息正文，因此悬浮提示不展示 Prompt 内容；无标题的新会话回退显示目录名。
 - CLI 会话仅支持激活 VSCode 集成终端或 Git Bash 窗口；Windows Terminal 等终端未支持。
 - 鼠标穿透开启后窗口不接收点击，需通过全局快捷键或托盘菜单恢复。
