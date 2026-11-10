@@ -122,6 +122,50 @@ export async function onOpenSettings(handler: () => void): Promise<UnlistenFn> {
   });
 }
 
+/**
+ * 监听主窗口显隐（Rust 侧为权威来源）；隐藏时前端暂停轮询与心跳。
+ * NOTE: Windows 上 WebView2 会节流隐藏窗口的后台计时器，不能只依赖 visibilitychange。
+ */
+export async function onWindowVisibility(handler: (active: boolean) => void): Promise<UnlistenFn> {
+  if (!IS_TAURI) {
+    return () => {};
+  }
+  return listen<boolean>("pinglet://window-visibility", (event) => {
+    handler(event.payload);
+  });
+}
+
+/** 监听窗口移动结束，用于自动主题重新采样。 */
+export async function onWindowMoved(handler: () => void): Promise<UnlistenFn> {
+  if (!IS_TAURI) {
+    return () => {};
+  }
+  return listen("pinglet://window-moved", () => {
+    handler();
+  });
+}
+
+export async function sampleBackdropLuminance(): Promise<number | null> {
+  if (!IS_TAURI) {
+    return null;
+  }
+  return invoke<number | null>("sample_backdrop_luminance");
+}
+
+export async function setNotificationPreferences(
+  systemNotifications: boolean,
+  doNotDisturb: boolean,
+): Promise<void> {
+  requireTauri();
+  await invoke("set_notification_preferences", { systemNotifications, doNotDisturb });
+}
+
+/** 恢复默认窗口位置并刷新 window-state 存档，供「恢复默认」使用。 */
+export async function resetWindowPosition(): Promise<void> {
+  requireTauri();
+  await invoke("reset_window_position");
+}
+
 export async function getAutoStart(): Promise<boolean> {
   requireTauri();
   return invoke<boolean>("is_autostart_enabled");

@@ -1,10 +1,38 @@
 # Pinglet v1.4 计划：托盘状态、自动主题与告警通知
 
-> NOTE: 本文是 2026-11-10 的设计稿，功能尚未实现。实现时若与代码或[使用说明](../usage.md)不一致，以代码与使用说明为准。
+> NOTE: 本文是 2026-11-10 的设计稿，v1.4.0 已按下文实现。实现细节与偏差见「实现状态」。若与代码或[使用说明](../usage.md)不一致，以代码与使用说明为准。
 >
-> 评估环境：本机 Windows 10（19045）+ Node 24，但未安装 Rust / Tauri 工具链，Rust 侧结论需在真机或 CI 的 Windows runner 上验证。本文中的“建议”“预期”均不是实测数据。
+> 评估环境：设计阶段记录为本机 Windows 10（19045）+ Node 24，未安装 Rust / Tauri 工具链；实现阶段已在 Windows 11 22621 + Rust MSVC 上完成 `cargo fmt --check` 与 `cargo test`（22 项通过），前端 `tsc`、Vitest（62 项）、ESLint、Prettier 全部通过。托盘闪烁、通知弹窗样式、GDI 采样效果、多显示器与 DPI 仍以真机交互验收为准。
 >
 > 2026-11-10 更新：已确认产品决策，并把单实例保护、免打扰、窗口位置记忆、托盘 tooltip、汇总区/心跳差量更新统一纳入本次实现范围。
+
+## 实现状态（2026-11-10）
+
+| 项 | 状态 | 实现与设计的主要差异 |
+| --- | --- | --- |
+| 隐藏轮询可靠性 | 已实现 | 未采用 `backgroundThrottling`（Tauri 2.12 窗口配置无此字段）。改为 Rust 后台线程每 5 秒采集会话并驱动托盘与通知弹窗，不受 WebView2 定时器节流影响；前端 2 秒轮询仅在窗口可见时运行。 |
+| 单实例保护 | 已实现 | `tauri-plugin-single-instance` 首个注册；第二次启动时关闭穿透、还原并聚焦主窗口。 |
+| 托盘三态图标 | 已实现 | 启动时内存合成 Idle / Working / Alert 三个图标：保持默认窗口图标完整尺寸，叠加状态色圆环（最细 3px，取图标短边 1/10）与右下角实心角标（半径取短边 24%）。未新增素材文件；验收反馈后取消 80% 缩放，并把应用图标改为与顶栏 logo 相同的红 / 橙 / 绿配色。二次反馈后再把图标改为满画布深色圆底、图形放大约 1.3 倍并加粗，保证 16/24px 托盘尺寸下可辨识。 |
+| 托盘闪烁与已读 | 已实现 | Rust 200ms tick、600ms 相位翻转；窗口可见即清除未读。未读只由「窗口隐藏期间新增告警」置位。 |
+| 托盘 tooltip | 已实现 | 零计数项省略，格式 `Pinglet · N 待处理 · N 已中断 · N 进行中`；仅在文本变化时调用 `set_tooltip`。 |
+| 自动主题 | 已实现 | GDI `GetDC(NULL)` + `GetPixel`，在窗口下方 6 逻辑像素处横向采 12 点并取亮度中位数；周期 10 秒、连续 2 次同向、最小切换间隔 10 秒；开启自动、移动 / 缩放结束、重新可见时 400ms 防抖后立即应用判定。判定逻辑抽为纯函数 `resolveAutoTheme`。 |
+| 自绘通知弹窗 | 已实现 | 使用独立 Tauri 窗口 `notification`（`notification.html` 第二 Vite 入口）自绘右下角卡片，不再使用 `tauri-plugin-notification`。仅「窗口隐藏或最小化 + 新增告警 + 已开启 + 非免打扰」触发，不设全局冷却（「状态突变才提醒」由 `alert_keys` 保证）；首次扫描只播种不弹；最多列 3 条，标题截断 24 字。固定主屏工作区右下角并按内容高度收缩，3 秒淡出 + Rust 5 秒兜底，点击卡片唤起主窗口，× 立即隐藏；不受 Windows 通知开关与「请勿打扰」影响。 |
+| 免打扰 | 已实现 | 前端抑制呼吸灯 / 音效 / 抖动 / 完成提示并保留告警色；Rust 侧抑制闪烁、tooltip 保持计数、通知弹窗不弹出。关闭免打扰时若窗口仍隐藏且仍有告警，恢复未读闪烁。设置面板「预览提醒」仍可用。 |
+| 窗口位置记忆 | 已实现 | `tauri-plugin-window-state` 仅启用 `StateFlags::POSITION`，存档为 `app_config_dir()/.window-state.json`；无存档时仍定位主屏右上角，有存档时 clamp 进工作区；「恢复默认」调用 `reset_window_position` 同步写回。 |
+| 汇总区差量更新 | 已实现 | 按 `待处理|已中断|进行中` 计数签名比较，未变化直接返回。 |
+| 心跳差量更新 | 已实现 | 保留秒级文案；等级变化才写 `data-level`，文本 / `title` / `aria-label` 仅在 logo tooltip 可见或强制刷新时写入。心跳改为非 live 的 `role="img"`，避免读屏每秒播报。 |
+| 面板行持续动效 | 已实现 | 待处理 / 已中断行显示背景呼吸（2.4s）+ 状态灯扩散光环（验收反馈后移除左侧竖条）；进行中行底部 2px 流光（2.6s 线性循环）。新增设置项「异常行呼吸灯」「进行中行流光」，默认开启，根节点 `data-alert-pulse` / `data-working-flow` 控制；与「提醒方式」的一次性提醒相互独立，免打扰不抑制。窗口隐藏 / 最小化时 `is-window-paused` 暂停动画；`prefers-reduced-motion` 下仅保留静态状态色。 |
+| 版本与测试 | 已实现 | 版本统一为 1.4.0；新增前端 `settings-schema.test.ts`、`auto-theme.test.ts`，Rust 新增 8 个纯逻辑测试。 |
+
+> 2026-11-10 真机验收后调整：① 自动主题在开启自动、窗口移动 / 缩放结束与重新可见时立即应用判定，周期采样仍保留连续两次一致与最小切换间隔；② 设置面板把「通知」改名为「提醒方式」并补充三者分工说明，不合并「系统通知」与「免打扰」；③ 托盘图标取消 80% 缩放，应用图标改用与顶栏 logo 相同的红 / 橙 / 绿配色，状态色圆环保持在画布边缘。
+
+> 2026-11-10 二次验收反馈：① 托盘图标改为满画布深色圆底 + 放大的信号图形（约 1.3 倍、描边加粗），顶栏 logo 同步更新；② 修复 debug 版托盘沿用旧图标的问题——`tauri-build` 不为图标文件声明 `rerun-if-changed`，`build.rs` 现显式声明 `cargo:rerun-if-changed=icons`；③ 设置面板新增「发送测试通知」按钮，用于验证 Windows 通知通道；④ 排查确认本机 Windows 11 **系统级「请勿打扰」**（设置 →「系统」→「通知」）处于开启状态：实测「发送测试通知」的 Toast 已写入通知数据库（`wpndatabase.db`）但屏幕上无横幅，截图确认该开关为「开」；它与设置面板里的「应用内免打扰」是两层独立开关（后者默认关闭）。`SHQueryUserNotificationState` 返回 5、`Windows.UI.Shell.FocusSessionManager.IsFocusActive` 返回 false，均无法反映 Windows 11 系统「请勿打扰」的真实状态，因此应用不做自动探测，只在设置面板与文档中提示用户去系统设置检查。开发运行（`target\debug`）的来源显示为“Windows PowerShell”，安装版为 `Pinglet`。
+
+> 2026-11-10 三次验收反馈：系统 Toast 的来源显示为“Windows PowerShell”，且受系统通知开关与「请勿打扰」影响，不符合“类似消息弹窗、短暂停留后自动隐藏”的预期。改为 **Tauri 自绘右下角弹窗**：删除 `tauri-plugin-notification` 依赖与 `notification:default` capability，新增 `notification` 窗口与 `notification.html` / `src/notification.ts` / `src/notification.css`；弹窗固定主屏工作区右下角，前端 6 秒淡出、Rust 8 秒兜底，点击卡片唤起主窗口，× / `Esc` 立即隐藏；设置项文案改为「通知弹窗」/「显示测试弹窗」。该方案不经过 Windows 通知通道，不受系统通知开关与「请勿打扰」影响。
+
+> 2026-11-11 四轮真机验收补充：`window.show()` 会走 tao 的 `SW_SHOW` 并抢走用户当前应用焦点（`focused(false)` 只在创建时生效，`WS_EX_NOACTIVATE` 不阻止 `ShowWindow` 激活），改用裸 `ShowWindow(SW_SHOWNOACTIVATE)` 显示；该调用绕过 tao 的 `WindowFlags::VISIBLE`，导致后续 `window.hide()` 的 `apply_diff` 因 diff 为空变成 no-op、6 / 8 秒自动隐藏失效，因此隐藏也统一改用裸 `ShowWindow(SW_HIDE)`。实测两轮复用均正常：显示约 6 秒后自动隐藏，不抢焦点、不进入任务栏。
+
+> 2026-11-11 五轮真机反馈与修复：用户反馈首次弹窗正常、同一会话稍后再次突变时看不到弹窗，但托盘闪烁正常。确认 `alert_keys` 已识别到新告警、前端事件监听与内容刷新正常，问题出在 45 秒全局冷却——第二次告警被静默丢弃，闪烁来自托盘未读逻辑。「状态突变才提醒」已由 `alert_keys` 保证，无需全局冷却，因此移除 `NOTIFICATION_COOLDOWN`：同一轮多个新告警仍聚合成一张卡片，会话离开告警态后再次突变会立即再次弹窗。另补充渲染层加固：裸 `ShowWindow(SW_HIDE)` 只隐藏原生窗口，WebView2 控制器仍认为页面可见，隐藏期间渲染器可能被遮挡检测挂起；`show_notification_window` / `hide_notification_window_raw` 现在同时通过 `with_webview` 调用 `ICoreWebView2Controller::SetIsVisible(true/false)` 同步渲染可见性。实测主窗口隐藏场景下连续两轮弹窗均能正确绘制新内容并按时自动隐藏。
 
 ## 一、背景与目标
 
@@ -32,7 +60,7 @@
 | 提醒 | `detectStateChange` 每轮最多产生一个事件；启动首轮已有会话不补闪；异常优先于「进行中 → 已完成」 |
 | 主题 | `ThemeMode = "dark" \| "light"`，持久化在 `pinglet.settings.v1`，`applyTheme` 只改根节点 `data-theme` |
 | 设置面板 | 主题为两段式选择（暗色 / 亮色） |
-| 窗口尺寸 | 持久化在 `pinglet.window.v1`，只记宽高；启动时 Rust 固定定位到主屏右上角 |
+| 窗口尺寸 | 持久化在 `pinglet.window.v2`，只记宽高；启动时 Rust 固定定位到主屏右上角 |
 | 单实例 | 未做限制，重复启动会出现多个托盘图标、重复轮询与重复提醒 |
 
 ### 关键约束：隐藏窗口时的轮询可靠性
@@ -186,15 +214,15 @@
 
 ### 5.2 已确认的触发规则
 
-- **仅当主窗口隐藏且出现新增异常时触发**；窗口可见时依赖现有呼吸灯 / 音效 / 抖动与列表本身。
+- **仅当主窗口隐藏或最小化且出现新增异常时触发**；窗口可见时依赖现有呼吸灯 / 音效 / 抖动与列表本身。
 - 只在**状态突变**时触发：启动首轮已有会话不补发，与现有提醒规则一致。
 - 免打扰开启时不弹窗。
 - 同一次轮询最多一条，聚合为汇总文案，例如：
   - 标题：`Pinglet · 2 个会话待处理`
   - 正文：`api-server 等待确认；web-client 已中断`
-- 冷却时间建议 30–60 秒，避免多条会话连续变化时轰炸。
+- 冷却时间建议 30–60 秒，避免多条会话连续变化时轰炸。**（已被五轮验收推翻：`alert_keys` 已保证只在状态突变时触发，全局冷却会静默丢弃同一会话的第二次告警，最终未采用。）**
 - 点击弹窗：唤起主窗口，并视为已读（停止托盘闪烁）。
-- 设置面板新增「系统通知」开关，默认开启；用户可随时关闭。
+- 设置面板新增「通知弹窗」开关，默认开启；用户可随时关闭。
 
 ### 5.3 方案对比与路线
 
@@ -204,44 +232,40 @@
 | B. 自绘右下角弹窗窗口 | 样式与 Pinglet 一致；可点击打开面板或定位会话；便携版同样可用 | 中（约 1.5–2.5 天） | 多一个 WebView2 窗口（约几十 MB 内存）；需处理多显示器、DPI、焦点、生命周期 |
 | C. 仅应用内提醒 | 现有呼吸灯 / 音效 / 抖动 | 已有 | 窗口隐藏时看不到 |
 
-推荐路线：
+实际路线（2026-11-10 真机反馈后调整）：
 
-1. 先接入原生 Toast，满足「像 QQ 消息提示」的主要诉求，成本最低。
-2. 真机验证 NSIS 安装版、`tauri dev`、便携版三种形态；若便携版不显示或点击体验不可接受，再实现自绘窗口替换。
-3. 自绘方案作为后备，不在首轮实现范围内。
+1. 首轮按方案 A 接入原生 Toast，但真机表现为来源“Windows PowerShell”的系统横幅，且受系统通知开关与「请勿打扰」影响。
+2. 改为方案 B 自绘右下角弹窗，已实现并替换方案 A；不再依赖 `tauri-plugin-notification`。
+3. 方案 C（仅应用内提醒）保留为窗口可见时的补充，不单独承担隐藏时的告警。
 
-> 原生 Toast 在 Windows 上的安装形态限制需真机验证：NSIS 安装版通常可用，`tauri dev` 与便携版可能不显示或归属到通用应用名下。
+> 方案 B 的代价是多一个隐藏的 WebView2 实例（约几十 MB 内存）；收益是样式、位置与自动隐藏完全可控，且三种安装形态表现一致。
 
 ### 5.4 实现要点
 
-原生 Toast：
+已采用的自绘弹窗：
 
-- 依赖 `tauri-plugin-notification`，capability 增加 `notification:default`，前端调用 `sendNotification`。
-- Windows 权限由系统接管，通常无需运行时申请。
-- 开发模式、便携版、NSIS 安装版三种形态都要单独验证。
+- 新增窗口 label `notification`：`decorations: false`、`transparent: true`、`always_on_top: true`、`skip_taskbar: true`、`focused: false`、`resizable: false`、初始 `visible: false`；懒创建并复用。
+- 位置取主屏工作区右下角（已排除任务栏），留 16 逻辑像素边距；按显示器 scale 换算物理坐标，工作区小于窗口时退回左上角。
+- 前端按卡片实测高度调用 `resize_notification_window` 收缩窗口并重新贴边，避免透明空白区域拦截桌面点击。
+- 新增 `notification.html` + `src/notification.ts` / `src/notification.css` 作为第二个 Vite 入口；capability `src-tauri/capabilities/notification.json` 的 `windows` 为 `["notification"]`。
+- Rust 将 payload 存入 `AppState` 并 emit `pinglet://notification-show`；页面启动时通过 `get_notification_payload` 拉取，窗口复用时重新读取。
+- 前端 3 秒后淡出并调用 `hide_notification_window`；Rust 5 秒兜底，generation 计数使旧计时失效。点击卡片调用 `open_main_window`，× 立即隐藏（窗口不可聚焦，`Esc` 仅作后备）。
+- window-state 以 denylist 排除通知窗口；`on_window_event` 只处理 `main` 窗口，避免通知窗口触发全局逻辑。
 - 通知内容只使用标题与目录名，不包含 Prompt 或消息正文。
-
-自绘弹窗窗口（后备）：
-
-- 新增窗口 label（如 `toast`）：`decorations: false`、`transparent: true`、`alwaysOnTop: true`、`skipTaskbar: true`、`focus: false`、`resizable: false`、初始 `visible: false`。
-- 位置取主窗口所在显示器的工作区右下角（已排除任务栏），留 12–16px 边距；多显示器与 DPI 需单独测。
-- 新增 HTML 入口或 `?toast=1` 视图；capability 的 `windows` 列表加入新 label。
-- 懒创建 + 复用隐藏，或弹窗结束后销毁，控制 WebView2 内存占用。
-- 点击窗口后隐藏弹窗并唤起主窗口。
 
 ### 5.5 性能
 
 - 只在状态突变时触发，无持续开销。
-- 原生 Toast 不增加常驻内存。
-- 自绘窗口会增加一个 WebView2 实例（约几十 MB），CPU 可忽略；需在真机确认内存增量。
+- 自绘窗口懒创建并复用，常驻一个隐藏的 WebView2 实例（约几十 MB），CPU 可忽略。
+- 弹窗隐藏后不轮询、不渲染，仅在下次触发时重新读取 payload。
 
 ### 5.6 验收
 
-- 隐藏窗口时新增警告能触发且只触发一次（受冷却约束）。
+- 隐藏或最小化窗口时新增警告能触发，且会话每次离开告警态后再次突变都会重新触发（无全局冷却）。
 - 启动首轮不弹窗；窗口可见时不弹窗。
 - 免打扰开启时不弹窗。
-- 专注助手开启时原生 Toast 的降级行为符合预期，必要时在文档中说明。
-- 点击弹窗能正确唤起主窗口并停止闪烁。
+- 弹窗固定主屏工作区右下角，3 秒后自动隐藏；点击卡片唤起主窗口并停止闪烁，× / `Esc` 立即隐藏。
+- 不受 Windows 通知开关与「请勿打扰」影响。
 - 连续多条会话变化时不刷屏。
 
 ## 六、配套改进（本次一并实现）
@@ -256,9 +280,9 @@
 ### 6.2 免打扰 / 专注模式
 
 - 设置模型新增 `doNotDisturb: boolean`，默认 `false`，持久化在 `pinglet.settings.v1`，旧数据缺字段时按默认值处理。
-- 设置面板在「提醒」区域增加 Switch，文案建议「免打扰」，描述「暂停闪烁、系统通知、音效、抖动与呼吸灯」。
+- 设置面板在「提醒」区域增加 Switch，文案建议「免打扰」，描述「暂停闪烁、通知弹窗、音效、抖动与呼吸灯」。
 - 开启后的行为：
-  - 不触发呼吸灯、音效、窗口抖动、完成提示、系统通知。
+  - 不触发呼吸灯、音效、窗口抖动、完成提示、通知弹窗。
   - 托盘不闪烁，只保留常亮警示色；进行中绿环、tooltip 计数与列表状态不变。
   - 设置面板里的「预览提醒」仍可执行一次，便于确认配置（显式操作，不受免打扰限制）。
 - 关闭后重新评估当前告警：若仍有未读警告，恢复闪烁；若已读则保持常亮。
@@ -267,11 +291,11 @@
 
 ### 6.3 窗口位置记忆
 
-- 推荐使用 `tauri-plugin-window-state`，只启用 `StateFlags::POSITION`，**不要启用 `SIZE`**，避免与现有的内容自适应高度和 `pinglet.window.v1` 冲突。
+- 推荐使用 `tauri-plugin-window-state`，只启用 `StateFlags::POSITION`，**不要启用 `SIZE`**，避免与现有的内容自适应高度和 `pinglet.window.v2` 冲突。
 - 启动时在窗口显示前恢复位置；首次启动或状态文件缺失时保留现有「主屏右上角」逻辑。
 - 恢复位置后仍需夹回当前显示器工作区，处理显示器拔插、分辨率变化；可在 Rust 侧新增 clamp，或保留前端 `keepWindowInsideWorkArea` 作为兜底。
 - 插件在退出 / 关闭时保存；强制结束进程可能丢失最后一次位置，可接受。
-- 备选方案：扩展 `pinglet.window.v1` 记录 `x` / `y`，前端恢复后延迟显示窗口；改动更大，若插件在真机上出现兼容问题再切换。
+- 备选方案：扩展 `pinglet.window.v2` 记录 `x` / `y`，前端恢复后延迟显示窗口；改动更大，若插件在真机上出现兼容问题再切换。
 - 验收：拖动窗口后退出重启，位置与尺寸都恢复；跨显示器、显示器断开后窗口仍在可见区域。
 
 ### 6.4 汇总区与心跳差量更新
@@ -292,7 +316,7 @@
 | 1 | 单实例保护 | `src-tauri/Cargo.toml`、`src-tauri/src/lib.rs` | 0.25 天 |
 | 2 | 托盘状态图标、已读语义、tooltip | `src-tauri/src/lib.rs`、`src/main.ts`、`src/system.ts`、`src/settings.ts` | 0.5–1 天 |
 | 3 | 自动主题 | `src-tauri/src/lib.rs`、`src-tauri/Cargo.toml`、`src/settings.ts`、`src/settings-panel.ts`、`src/system.ts`、`src/main.ts` | 0.5–1 天 |
-| 4 | 原生 Toast + 「系统通知」开关 | `src-tauri/Cargo.toml`、`src-tauri/capabilities/default.json`、`src/system.ts`、`src/main.ts`、`src/settings-panel.ts` | 0.5 天 |
+| 4 | 自绘通知弹窗 + 「通知弹窗」开关 | `src-tauri/src/lib.rs`、`src-tauri/capabilities/notification.json`、`notification.html`、`src/notification.ts`、`src/notification.css`、`vite.config.ts`、`src/system.ts`、`src/settings-panel.ts` | 0.5–1 天 |
 | 5 | 免打扰设置与全提醒链路抑制 | `src/settings.ts`、`src/settings-panel.ts`、`src/main.ts`、`src-tauri/src/lib.rs` | 0.25–0.5 天 |
 | 6 | 窗口位置记忆 | `src-tauri/Cargo.toml`、`src-tauri/src/lib.rs`、`src-tauri/tauri.conf.json` | 0.25–0.5 天 |
 | 7 | 汇总区 / 心跳差量更新 | `src/main.ts`、`src/styles.css`（如需） | 0.25 天 |
@@ -305,7 +329,7 @@
 
 1. 「警告」同时包含待处理与已中断。
 2. 闪烁采用已读语义：打开面板即停止闪烁，保留常亮警示色；新警告出现时重新闪烁。
-3. Toast 仅对「主窗口隐藏 + 新增异常」生效；免打扰开启时不触发；设置中的「系统通知」开关默认开启。
+3. 通知弹窗仅对「主窗口隐藏或最小化 + 新增异常」生效；免打扰开启时不触发；设置中的「通知弹窗」开关默认开启。
 4. 自动主题的阈值先按本文建议值实现，真机测试时再调整。
 5. 托盘高亮先用绿色圆环实现，实机 16px 下对比后再决定是否改为角标。
 
@@ -326,9 +350,17 @@
 
 - 本机有 Node 24 / npm 11，可执行前端类型检查、构建与 Vitest。
 - 本机无 Rust / cargo，Rust 侧改动无法本地编译；可通过 GitHub Actions 的 Windows runner 验证，或安装 Rust MSVC 工具链后执行 `cargo test` / `cargo fmt --check` / `cargo clippy`。
-- 托盘闪烁、系统 Toast、GDI 采样、单实例、窗口位置恢复、多显示器与 DPI 必须在真实 Windows 桌面验收，浏览器预览无法覆盖。
+- 托盘闪烁、通知弹窗、GDI 采样、单实例、窗口位置恢复、多显示器与 DPI 必须在真实 Windows 桌面验收，浏览器预览无法覆盖。
 
 ## 十一、变更记录
 
 - 2026-11-10：初稿。完成托盘状态、自动主题、告警弹窗的可行性、性能与风险评估。
 - 2026-11-10：确认产品决策；纳入单实例保护、免打扰、窗口位置记忆、托盘 tooltip、汇总区/心跳差量更新；补充隐藏轮询节流风险与实施顺序。
+- 2026-11-10：v1.4.0 实现完成，补充「实现状态」与偏差说明；隐藏轮询改用 Rust 后台线程。
+- 2026-11-11：真机验收调整。通知弹窗设置项改称「通知消息」，弹窗跟随当前生效主题（自动模式复用持久化的判定结果，本页不再只以暗色兜底）；托盘圆环加粗并增加右下角实心角标，闪烁相位 700ms → 600ms；会话行移除入口标签，入口信息只在悬浮提示展示；移除「通知测试」入口；默认设置改为自动主题、默认开启点击关闭时最小化到托盘。另修复同一会话再次进入待处理时不弹窗的问题：`alert_event_key` 为待处理告警追加 `statusUpdatedAt`，同一次等待不重复弹，新的等待请求会重新弹。
+- 2026-11-11：通知消息停留时间 6 秒 → 3 秒（Rust 兜底 8 秒 → 5 秒）；默认窗口宽度 280 → 320（最小宽度仍 280，尺寸存档键升为 `pinglet.window.v2`）；会话行目录标签由右对齐改为左对齐。
+- 2026-11-11：会话行第二行恢复入口识别，改为右侧单色小图标（VSCode / 终端）且不显示文字标签，避免行内只有一个目录标签显得空。
+- 2026-11-11：第二行目录标签与入口图标统一移到右侧对齐。
+- 2026-11-11：新增面板行持续动效。待处理 / 已中断行采用「左侧状态色竖条 + 背景呼吸 + 状态灯扩散光环」，进行中行采用「底部循环流光」，均只作用于对应状态行，已完成行无动效。新增两个独立开关「异常行呼吸灯」「进行中行流光」，默认开启，写入 `panelEffects`；与「提醒方式」的一次性提醒解耦。窗口隐藏 / 最小化时暂停，系统开启「减少动态效果」时异常行只保留静态竖条。
+- 2026-11-11：入口图标增加识别色，VSCode 用蓝色、终端用红色（随亮 / 暗主题分别取值），不再统一使用弱化文字色；图标由裸 `>_` 改为终端窗口造型，尺寸从 `0.86em` 放大到 `1em`。
+- 2026-11-11：真机查看后移除异常行左侧状态色竖条（视觉上过于突兀），异常行只保留背景呼吸与状态灯扩散光环。

@@ -2,6 +2,7 @@
  * @ai-generated deepseek-v4-flash
  * Pinglet 看板前端入口：轮询 Rust 侧的 list_sessions，并按四态渲染、提醒与窗口行为。
  */
+import { scheduleAutoThemeSample, startAutoTheme, stopAutoTheme } from "./auto-theme";
 import {
   BOARD_STATES,
   STATE_META,
@@ -33,12 +34,16 @@ import {
   listSessions,
   onOpenSettings,
   onTrayClickThroughChange,
+  onWindowMoved,
   onWindowResized,
+  onWindowVisibility,
+  resetWindowPosition,
   resizeWindow,
   setAutoStart,
   setClickThrough,
   setCloseToTray,
   setGlobalShortcut,
+  setNotificationPreferences,
   startResizeDragging,
   toMessage,
   type ResizeDirection,
@@ -52,10 +57,11 @@ const WINDOW_MIN_WIDTH = 280;
 const WINDOW_MAX_WIDTH = 600;
 const WINDOW_MIN_HEIGHT = 200;
 const WINDOW_MAX_HEIGHT = 800;
-// 默认贴近最小宽度；高度上限约 5 行会话，超出后列表内部滚动
-const DEFAULT_WINDOW_WIDTH = WINDOW_MIN_WIDTH;
+// 默认宽度略宽于最小值，避免目录标签与标题过度截断；高度上限约 5 行会话，超出后列表内部滚动
+const DEFAULT_WINDOW_WIDTH = 320;
 const DEFAULT_WINDOW_HEIGHT = 320;
-const WINDOW_SIZE_STORAGE_KEY = "pinglet.window.v1";
+// v2：默认宽度由 280 调整为 320，换键让旧存档不再覆盖新默认宽度
+const WINDOW_SIZE_STORAGE_KEY = "pinglet.window.v2";
 const WINDOW_SIZE_SAVE_DELAY_MS = 350;
 const WINDOW_RESIZE_SETTLE_MS = 500;
 const WINDOW_SIZE_EPSILON = 2;
@@ -93,11 +99,11 @@ const FNV_OFFSET_BASIS = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 const UNKNOWN_FOLDER_KEY = "未知目录";
 const UNKNOWN_TAG_COLOR = "var(--color-text-sub)";
-const ENTRYPOINT_TAG_COLORS: Readonly<Record<string, string>> = {
-  "vs-code": "var(--color-entry-vscode)",
-  cli: "var(--color-entry-cli)",
-};
-const ENTRYPOINT_OTHER_COLOR = "var(--color-entry-other)";
+// 第二行右侧的入口图标：VSCode 蓝 / 终端红用于区分入口，入口文字仍在悬浮详情中展示
+const VSCODE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>';
+const CLI_ICON_SVG =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.2" y="2" width="13.6" height="12" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M4.2 5.4 6.8 7.8l-2.6 2.4M8.4 10.2h4.4"/></svg>';
 
 // 无边框窗口的 8 个缩放方向，名称与 Tauri ResizeDirection 一致
 const RESIZE_DIRECTIONS: ReadonlySet<ResizeDirection> = new Set([
@@ -128,8 +134,8 @@ type RowView = {
   dot: HTMLSpanElement;
   stateLabel: HTMLSpanElement;
   name: HTMLSpanElement;
-  entrypointTag: HTMLSpanElement;
   folder: HTMLSpanElement;
+  entryIcon: HTMLSpanElement;
   duration: HTMLSpanElement;
 };
 
@@ -138,6 +144,8 @@ type BreathingKind = "alert" | "completion";
 type AbnormalState = Extract<BoardState, "blocked" | "interrupted">;
 
 type ReminderEvent = { kind: "alert"; state: AbnormalState } | { kind: "completion" };
+
+type HeartbeatLevel = "ok" | "warn" | "offline";
 
 if (!IS_TAURI) {
   document.body.classList.add("browser-preview");
@@ -174,6 +182,10 @@ let folderColorSlots = new Map<string, number>();
 
 let isRefreshing = false;
 let lastSuccessfulRefreshAt: number | null = null;
+// 显隐以 Rust 的 pinglet://window-visibility 为权威来源，页面可见性只作兜底
+let isWindowActive = true;
+let lastHeartbeatLevel: HeartbeatLevel | null = null;
+let lastSummarySignature = "";
 
 const storedWindowSize = readStoredWindowSize();
 let preferredWindowWidth = clampWindowWidth(storedWindowSize?.width ?? DEFAULT_WINDOW_WIDTH);
@@ -282,13 +294,6 @@ function folderTagColor(key: string, slots: Map<string, number>): string {
   return slot === undefined ? UNKNOWN_TAG_COLOR : `var(--color-tag-${slot})`;
 }
 
-function entrypointTagColor(label: string | null): string {
-  if (label === null) {
-    return UNKNOWN_TAG_COLOR;
-  }
-  return ENTRYPOINT_TAG_COLORS[label] ?? ENTRYPOINT_OTHER_COLOR;
-}
-
 function createRowView(): RowView {
   const element = document.createElement("div");
   element.className = "session-row";
@@ -304,24 +309,25 @@ function createRowView(): RowView {
   const name = document.createElement("span");
   name.className = "session-name";
 
-  const entrypointTag = document.createElement("span");
-  entrypointTag.className = "entrypoint-tag";
-  entrypointTag.hidden = true;
-
   const folder = document.createElement("span");
   folder.className = "cwd";
+
+  const entryIcon = document.createElement("span");
+  entryIcon.className = "entry-icon";
+  entryIcon.setAttribute("aria-hidden", "true");
+  entryIcon.hidden = true;
 
   const duration = document.createElement("span");
   duration.className = "duration";
 
-  // 双行布局：第一行状态与标题，第二行目录与入口标签（目录在前，标签在右）
+  // 双行布局：第一行状态与标题，第二行目录标签与右侧入口图标（入口文字只在悬浮详情中展示）
   const mainLine = document.createElement("div");
   mainLine.className = "session-main";
   mainLine.append(stateLabel, name, duration);
 
   const metaLine = document.createElement("div");
   metaLine.className = "session-meta";
-  metaLine.append(folder, entrypointTag);
+  metaLine.append(folder, entryIcon);
 
   const content = document.createElement("div");
   content.className = "session-content";
@@ -374,8 +380,8 @@ function createRowView(): RowView {
     dot,
     stateLabel,
     name,
-    entrypointTag,
     folder,
+    entryIcon,
     duration,
   };
 }
@@ -400,22 +406,26 @@ function updateRowView(
   view.stateLabel.textContent = meta.label;
   view.name.textContent = row.title;
 
-  const entrypoint = entrypointLabel(row.entrypoint);
-  if (entrypoint === null) {
-    view.entrypointTag.hidden = true;
-    view.entrypointTag.textContent = "";
-  } else {
-    view.entrypointTag.hidden = false;
-    view.entrypointTag.textContent = entrypoint;
-  }
-  view.entrypointTag.style.setProperty("--tag-color", entrypointTagColor(entrypoint));
-
   const folder = directoryName(row.cwd);
   view.folder.textContent = folder;
   view.folder.style.setProperty(
     "--tag-color",
     folderTagColor(folderColorKey(row.cwd), folderColors),
   );
+
+  const entrypoint = entrypointLabel(row.entrypoint);
+  const iconKind = entrypoint === "vs-code" || entrypoint === "cli" ? entrypoint : null;
+  if (iconKind === null) {
+    view.entryIcon.hidden = true;
+  } else {
+    if (view.entryIcon.dataset.kind !== iconKind) {
+      view.entryIcon.dataset.kind = iconKind;
+      // NOTE: 图标为静态 SVG 常量，不包含任何会话数据
+      view.entryIcon.innerHTML = iconKind === "vs-code" ? VSCODE_ICON_SVG : CLI_ICON_SVG;
+    }
+    view.entryIcon.hidden = false;
+  }
+
   view.duration.textContent = describeDuration(row, state, now);
 
   const isDisabled = row.cwd === null;
@@ -512,6 +522,12 @@ function renderLogoState(
 }
 
 function renderSummary(blockedCount: number, interruptedCount: number, workingCount: number): void {
+  // 计数没变时跳过 DOM 重建，轮询每 2 秒触发也不产生无意义重排
+  const signature = `${blockedCount}|${interruptedCount}|${workingCount}`;
+  if (signature === lastSummarySignature) {
+    return;
+  }
+  lastSummarySignature = signature;
   summaryElement.replaceChildren();
 
   if (blockedCount > 0) {
@@ -630,12 +646,16 @@ function playShakeEffect(kind: BreathingKind = "alert"): void {
 }
 
 function triggerAlertReminder(state: AbnormalState): void {
-  const { reminders } = getSettings();
+  const { reminders, doNotDisturb } = getSettings();
   if (reminders.none) {
     return;
   }
 
+  // 免打扰仍更新告警色（托盘状态与计数照常），只跳过闪烁、音效与抖动
   setAlertColor(state);
+  if (doNotDisturb) {
+    return;
+  }
   if (reminders.breathing) {
     playBreathingEffect(ALERT_BREATHING_CYCLES, "alert");
   }
@@ -649,8 +669,8 @@ function triggerAlertReminder(state: AbnormalState): void {
 
 /** 完成提示：呼吸灯用进行中语义色闪烁一次，音效响一次，窗口抖动一次。 */
 function triggerCompletionReminder(): void {
-  const { reminders } = getSettings();
-  if (reminders.none) {
+  const { reminders, doNotDisturb } = getSettings();
+  if (reminders.none || doNotDisturb) {
     return;
   }
   // 异常提醒进行中时不让完成呼吸打断它的颜色与轮次，但音效与抖动照常
@@ -811,7 +831,7 @@ function scheduleLogoTooltip(): void {
       return;
     }
     // 显示瞬间同步一次，保证时间与颜色是最新值
-    updateHeartbeat();
+    updateHeartbeat(true);
     logoTooltipElement.hidden = false;
     positionLogoTooltip();
   }, TOOLTIP_SHOW_DELAY_MS);
@@ -944,13 +964,14 @@ function formatClockTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-function updateHeartbeat(): void {
+/** 心跳每秒计算一次；tooltip 收起时只写等级，避免每秒重写文本节点与辅助属性。 */
+function updateHeartbeat(force = false): void {
   const age =
     lastSuccessfulRefreshAt === null
       ? Number.POSITIVE_INFINITY
       : Date.now() - lastSuccessfulRefreshAt;
 
-  let level: "ok" | "warn" | "offline";
+  let level: HeartbeatLevel;
   if (age > HEARTBEAT_OFFLINE_MS) {
     level = "offline";
   } else if (age > HEARTBEAT_WARN_MS) {
@@ -959,12 +980,20 @@ function updateHeartbeat(): void {
     level = "ok";
   }
 
+  if (level !== lastHeartbeatLevel) {
+    lastHeartbeatLevel = level;
+    heartbeatElement.dataset.level = level;
+  }
+
+  // 秒级时间仅在用户悬停查看时同步，展示瞬间由 scheduleLogoTooltip 强制刷新
+  if (!force && logoTooltipElement.hidden) {
+    return;
+  }
+
   const text =
     lastSuccessfulRefreshAt === null
       ? "尚未刷新"
       : `刷新于 ${formatClockTime(lastSuccessfulRefreshAt)}`;
-
-  heartbeatElement.dataset.level = level;
   heartbeatElement.title = text;
   heartbeatElement.setAttribute("aria-label", text);
   heartbeatTextElement.textContent = text;
@@ -1054,6 +1083,8 @@ function handleWindowResized(physicalWidth: number, physicalHeight: number): voi
   }
 
   lastUserResizeAt = Date.now();
+  // 窗口底边变化后采样区域也变了，缩放结束后立即重新判定主题
+  scheduleAutoThemeSample();
   // 只拖宽度时不要把当前自动收缩后的高度误记为新的高度上限
   if (widthChanged) {
     preferredWindowWidth = clampWindowWidth(width);
@@ -1241,6 +1272,16 @@ function applyCloseAction(closeToTray: boolean): void {
   closeButton.title = actionLabel;
 }
 
+/** 通知弹窗偏好由 Rust 后台线程判定，设置变化时同步过去；浏览器预览无事可做。 */
+function syncNotificationPreferences(systemNotifications: boolean, doNotDisturb: boolean): void {
+  if (!IS_TAURI) {
+    return;
+  }
+  void setNotificationPreferences(systemNotifications, doNotDisturb).catch((error: unknown) => {
+    console.warn("pinglet: 同步通知弹窗偏好失败", error);
+  });
+}
+
 async function resetAllSettings(): Promise<void> {
   const defaults = resetSettings();
   applyPinned(defaults.pinned);
@@ -1256,6 +1297,11 @@ async function resetAllSettings(): Promise<void> {
         label: "全局快捷键",
         run: setGlobalShortcut(defaults.shortcut === "" ? null : defaults.shortcut),
       },
+      {
+        label: "通知弹窗偏好",
+        run: setNotificationPreferences(defaults.systemNotifications, defaults.doNotDisturb),
+      },
+      { label: "窗口位置", run: resetWindowPosition() },
     ];
     const results = await Promise.allSettled(tasks.map((task) => task.run));
     const failures = results.flatMap((result, index) =>
@@ -1425,10 +1471,20 @@ const settingsPanelHandle = mountSettingsPanel(settingsPanelElement, {
 });
 
 const initialSettings = getSettings();
+let lastThemeMode = initialSettings.theme;
 applyPinned(initialSettings.pinned);
 applyCloseAction(initialSettings.closeToTray);
+syncNotificationPreferences(initialSettings.systemNotifications, initialSettings.doNotDisturb);
+startAutoTheme();
 subscribeSettings(() => {
-  applyCloseAction(getSettings().closeToTray);
+  const settings = getSettings();
+  applyCloseAction(settings.closeToTray);
+  // 只有主题模式变化才重启自动主题采样，避免无关设置反复重置判定进度
+  if (settings.theme !== lastThemeMode) {
+    lastThemeMode = settings.theme;
+    startAutoTheme();
+  }
+  syncNotificationPreferences(settings.systemNotifications, settings.doNotDisturb);
   // 字号变化会改变内容高度，下一帧重新按内容调整窗口
   window.requestAnimationFrame(() => {
     void resizeWindowToContent();
@@ -1438,6 +1494,25 @@ if (IS_TAURI) {
   initialWindowSizeReady = applyInitialWindowSize();
   void onWindowResized(handleWindowResized).catch((error: unknown) => {
     console.warn("pinglet: 监听窗口尺寸失败", error);
+  });
+  // Rust 侧判断窗口是否可见/最小化；恢复后立即刷新一次并重新启动自动主题采样
+  void onWindowVisibility((active) => {
+    isWindowActive = active;
+    syncWindowPauseClass();
+    if (active) {
+      void refresh();
+      startAutoTheme();
+    } else {
+      // 隐藏/最小化时没有可见主题可调，停掉周期采样，重新显示时再立即判定
+      stopAutoTheme();
+    }
+  }).catch((error: unknown) => {
+    console.warn("pinglet: 监听窗口显隐失败", error);
+  });
+  void onWindowMoved(() => {
+    scheduleAutoThemeSample();
+  }).catch((error: unknown) => {
+    console.warn("pinglet: 监听窗口移动失败", error);
   });
   void setCloseToTray(initialSettings.closeToTray).catch((error: unknown) => {
     console.warn("pinglet: 初始化关闭行为失败", error);
@@ -1473,22 +1548,33 @@ if (
   setSettingsOpen(true);
 }
 
+// 窗口隐藏 / 最小化时暂停轮询；Rust 事件与页面可见性任一判定隐藏即暂停
+function isPollingPaused(): boolean {
+  return !isWindowActive || document.visibilityState === "hidden";
+}
+
+/** 同步暂停持续动效的根节点类；窗口不可见时 CSS 动画全部暂停。 */
+function syncWindowPauseClass(): void {
+  document.documentElement.classList.toggle("is-window-paused", isPollingPaused());
+}
+
+syncWindowPauseClass();
 updateHeartbeat();
-// 窗口隐藏 / 最小化时暂停轮询，恢复可见后立即刷新一次。
 setInterval(() => {
-  if (document.visibilityState === "hidden") {
+  if (isPollingPaused()) {
     return;
   }
   updateHeartbeat();
 }, HEARTBEAT_INTERVAL_MS);
 setInterval(() => {
-  if (document.visibilityState === "hidden") {
+  if (isPollingPaused()) {
     return;
   }
   void refresh();
 }, REFRESH_INTERVAL_MS);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
+  syncWindowPauseClass();
+  if (document.visibilityState === "visible" && isWindowActive) {
     void refresh();
   }
 });

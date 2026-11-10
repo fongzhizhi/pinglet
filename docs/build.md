@@ -35,7 +35,7 @@ npm run dev
 ```
 
 - 非 Tauri 环境自动加载 `src/mock-sessions.ts` 的模拟数据，覆盖四态、未知状态兜底与死进程残留。
-- 页面按 280px 宽度居中显示（隐藏缩放热区），标题栏带「浏览器预览」标记。
+- 页面按 320px 宽度居中显示（隐藏缩放热区），标题栏带「浏览器预览」标记。
 - 仅 Tauri 提供的能力（拖拽、关闭、托盘、快捷键、双击激活 VSCode / Git Bash）在浏览器中会以提示代替。
 - 开发环境可用 `http://localhost:1420/?settings=1` 直接打开设置面板。
 - Vite 固定使用 1420 端口（`strictPort`），端口被占用时启动会失败。
@@ -58,10 +58,11 @@ NSIS 工具集缓存在 `%LOCALAPPDATA%\tauri\NSIS`，缓存存在时打包不�
 
 ## 图标
 
-- 应用 / 托盘 / 安装包图标以 `assets/app-icon.svg` 为唯一源文件（1024×1024，同一图形加深色圆底）。
+- 应用 / 托盘 / 安装包图标以 `assets/app-icon.svg` 为唯一源文件（1024×1024，与顶栏 logo 同图形同配色，深色圆底铺满画布，图形放大约 1.3 倍并加粗）。
 - 修改后运行 `npx tauri icon assets/app-icon.svg` 重新生成 `src-tauri/icons/`。
-- 仓库只保留 `bundle.icon` 引用的 5 个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico`、`icon.icns`），其余尺寸、Store 图标与 `android/`、`ios/` 目录在生成后删除。托盘图标取自默认窗口图标，无需单独配置；生成物不要手工编辑。
-- 顶栏 logo 是 `index.html` 内的内联 SVG，几何需与 `assets/app-icon.svg` 保持一致。
+- 仓库只保留 `bundle.icon` 引用的 5 个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico`、`icon.icns`），其余尺寸、Store 图标与 `android/`、`ios/` 目录在生成后删除。托盘三态图标由 Rust 在运行时基于 exe 内嵌的默认窗口图标合成（完整尺寸 + 状态色圆环），无需单独素材或配置；生成物不要手工编辑。
+- `build.rs` 已声明 `cargo:rerun-if-changed=icons`，图标重新生成后会触发 Windows 资源重编。若 debug 版托盘仍显示旧图标，重启 `tauri dev`，必要时执行 `cargo clean -p pinglet` 后再构建。
+- 顶栏 logo 是 `index.html` 内的内联 SVG，几何与配色需与 `assets/app-icon.svg` 保持一致。
 
 ## 版本号
 
@@ -82,10 +83,10 @@ Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板�
 
 1. 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号。
 2. 提交并推送 `master`，确认 CI 通过。
-3. 打标签并推送：`git tag v1.3.0`、`git push origin v1.3.0`。
+3. 打标签并推送：`git tag v1.4.0`、`git push origin v1.4.0`。
 4. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的安装包与便携版后发布。
 
-> 如果目标版本的标签已存在，先递增版本号（例如 `1.3.1`）并同步三处版本，再打新标签；不要重复推送同一个标签。
+> 如果目标版本的标签已存在，先递增版本号（例如 `1.4.1`）并同步三处版本，再打新标签；不要重复推送同一个标签。
 
 ### 在 GitHub 页面发布
 

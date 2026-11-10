@@ -10,9 +10,12 @@ import {
   setAutoStartSetting,
   setClickThroughSetting,
   setCloseToTraySetting,
+  setDoNotDisturbSetting,
   setFontSize,
+  setPanelEffect,
   setReminder,
   setShortcutSetting,
+  setSystemNotificationsSetting,
   setTheme,
   setTransparencySetting,
   subscribeSettings,
@@ -58,6 +61,7 @@ type ReminderOption = {
 const THEME_OPTIONS: readonly SegmentedOption<ThemeMode>[] = [
   { value: "dark", label: "暗色" },
   { value: "light", label: "亮色" },
+  { value: "auto", label: "自动" },
 ];
 
 const FONT_SIZE_OPTIONS: readonly SegmentedOption<FontSize>[] = [
@@ -341,7 +345,8 @@ export function mountSettingsPanel(
   transparencyRow.row.append(transparencyControl);
   appearanceSection.append(transparencyRow.row);
 
-  const reminderRow = createSettingRow("通知");
+  const reminderRow = createSettingRow("提醒方式");
+  reminderRow.row.title = "窗口可见时的窗口内提醒，与通知消息相互独立";
   const reminderGroup = document.createElement("div");
   reminderGroup.className = "reminder-group";
   const reminderInputs: HTMLInputElement[] = [];
@@ -356,6 +361,51 @@ export function mountSettingsPanel(
   }
   reminderRow.row.append(reminderGroup);
   appearanceSection.append(reminderRow.row);
+
+  const alertPulseRow = createSwitchRow(
+    "异常行呼吸灯",
+    initial.panelEffects.alertPulse,
+    false,
+    (enabled) => {
+      setPanelEffect("alertPulse", enabled);
+    },
+  );
+  alertPulseRow.row.title =
+    "待处理 / 已中断会话行持续呼吸：背景呼吸 + 状态灯扩散光环；与「提醒方式」的一次性提醒相互独立";
+  appearanceSection.append(alertPulseRow.row);
+
+  const workingFlowRow = createSwitchRow(
+    "进行中行流光",
+    initial.panelEffects.workingFlow,
+    false,
+    (enabled) => {
+      setPanelEffect("workingFlow", enabled);
+    },
+  );
+  workingFlowRow.row.title = "进行中会话行底部循环流动的光带，表示任务仍在执行";
+  appearanceSection.append(workingFlowRow.row);
+
+  const systemNotificationsRow = createSwitchRow(
+    "通知消息",
+    initial.systemNotifications,
+    !IS_TAURI,
+    (enabled) => {
+      setSystemNotificationsSetting(enabled);
+    },
+  );
+  systemNotificationsRow.row.title =
+    "仅在窗口隐藏或最小化且出现新异常时，在主屏右下角弹出应用内通知卡片，3 秒后自动隐藏；与提醒方式相互独立";
+  appearanceSection.append(systemNotificationsRow.row);
+
+  const doNotDisturbRow = createSwitchRow("免打扰", initial.doNotDisturb, false, (enabled) => {
+    setDoNotDisturbSetting(enabled);
+  });
+  // NOTE: 这里只控制 Pinglet 自己的提醒链路；Windows 系统「请勿打扰」是另一层开关，
+  // 且 Windows 11 22621 上没有可靠的 API 能读取它，因此不做自动探测。
+  doNotDisturbRow.row.title =
+    "暂停应用内的全部提醒与托盘闪烁，保留托盘告警色和计数；与 Windows 系统「请勿打扰」相互独立";
+  appearanceSection.append(doNotDisturbRow.row);
+
   fragment.append(appearanceSection);
 
   // ============ 系统与行为 ============
@@ -566,10 +616,15 @@ export function mountSettingsPanel(
       input.checked = current.reminders[key];
     }
 
+    alertPulseRow.input.checked = current.panelEffects.alertPulse;
+    workingFlowRow.input.checked = current.panelEffects.workingFlow;
+
     autoStartRow.input.checked = current.autoStart;
     closeToTrayRow.input.checked = current.closeToTray;
     clickThroughRow.input.checked = current.clickThrough;
     shortcutInput.value = current.shortcut;
+    systemNotificationsRow.input.checked = current.systemNotifications;
+    doNotDisturbRow.input.checked = current.doNotDisturb;
   }
 
   async function syncSystemState(): Promise<void> {

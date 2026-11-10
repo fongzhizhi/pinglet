@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/notification.css" />
+    <title>Pinglet 通知</title>
+    <script type="module" src="/src/notification.ts" defer></script>
+  </head>
+
+  <body>
+    <article id="notification-card" class="notification-card" role="status" aria-live="polite">
+      <div class="notification-accent" aria-hidden="true"></div>
+      <div class="notification-content">
+        <header class="notification-header">
+          <!-- 与顶栏 logo 同一几何；三色全部点亮，暗示存在需要关注的会话 -->
+          <svg
+            class="notification-logo"
+            viewBox="0 0 1024 1024"
+            width="16"
+            height="16"
+            aria-hidden="true"
+          >
+            <g transform="translate(512 502) scale(1.3) translate(-512 -502)">
+              <path
+                id="logo-pending"
+                class="logo-part"
+                d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1"
+                fill="none"
+                stroke-width="95"
+                stroke-linecap="round"
+              />
+              <path
+                id="logo-interrupted"
+                class="logo-part"
+                d="M311 443.1A230.4 230.4 0 0 1 577.9 630"
+                fill="none"
+                stroke-width="110"
+                stroke-linecap="round"
+              />
+              <circle id="logo-running" class="logo-part" cx="351" cy="670" r="110" />
+            </g>
+          </svg>
+          <span id="notification-title" class="notification-title">Pinglet</span>
+          <button
+            id="notification-close"
+            class="notification-close"
+            type="button"
+            aria-label="关闭通知"
+            title="关闭"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M4 4l8 8M12 4l-8 8" />
+            </svg>
+          </button>
+        </header>
+        <div id="notification-items" class="notification-items"></div>
+        <div id="notification-more" class="notification-more" hidden></div>
+      </div>
+    </article>
+  </body>
+</html>

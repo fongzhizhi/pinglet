@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import packageJson from "./package.json" with { type: "json" };
 const host = process.env.TAURI_DEV_HOST;
 
@@ -7,6 +8,16 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   define: {
     __APP_VERSION__: JSON.stringify(packageJson.version),
+  },
+
+  // 主窗口与右下角通知弹窗是两个独立 HTML 入口
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        notification: fileURLToPath(new URL("./notification.html", import.meta.url)),
+      },
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

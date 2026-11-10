@@ -32,6 +32,7 @@
 
 - [ ] **P2 补测试，优先隐私契约**
   - 前端：把 `src/settings.ts` 的 `parseSettings` / `parseReminders` / `normalizePanelTransparency` 抽成纯函数模块，补损坏 JSON、字段类型错误、范围裁剪、提醒组合等测试。
+    - v1.4 已完成：纯逻辑迁至 `src/settings-schema.ts`，`src/settings-schema.test.ts` 覆盖空存储、自动主题、通知字段、类型回退、损坏 JSON 与快捷键截断；其余分支继续补。
   - Rust：把 session 文件解析抽成 `parse_session(&str)` / `read_session_file(path)`，补白名单字段、未知字段忽略、非交互 `kind` 跳过、错误信息不含 JSON、transcript 未命中负缓存等测试。
   - 验收：`npm test` 与 `cargo test` 覆盖上述分支；不引入 DOM 测试框架。
 
@@ -47,7 +48,9 @@
 - [ ] **P2 可访问性小修**
   - 设置面板：`role="dialog" aria-modal="true"`，背景 `inert` 或焦点陷阱；保留现有 Esc 关闭与焦点归还。
   - 汇总区：`aria-live="polite"` 的内容每 2 秒 `replaceChildren`，改为文本变化时才更新。
+    - v1.4 已完成：按计数签名比较，未变化不重建 DOM。
   - 心跳：`role="status"` + 每秒 `aria-label` 更新，改为仅在等级变化时更新，或改成非 live 的 `role="img"`。
+    - v1.4 已完成：改为 `role="img"`；等级变化才写 `data-level`，文本仅在 tooltip 可见时更新。
 
 ## 可选/长期
 

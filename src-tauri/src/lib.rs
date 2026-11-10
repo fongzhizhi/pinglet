@@ -1,33 +1,42 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 #[cfg(target_os = "windows")]
 use sysinfo::{Process, ProcessRefreshKind, UpdateKind};
+use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_window_state::{AppHandleExt as WindowStateAppHandleExt, StateFlags};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::Graphics::Gdi::{CLR_INVALID, GetDC, GetPixel, ReleaseDC};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
-    ShowWindow,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SetForegroundWindow, ShowWindow,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::core::BOOL;
 
 const SESSION_STATUS_UNKNOWN: &str = "unknown";
 const SESSION_KIND_INTERACTIVE: &str = "interactive";
+const WINDOW_LABEL: &str = "main";
+const NOTIFICATION_WINDOW_LABEL: &str = "notification";
+const EVENT_WINDOW_VISIBILITY: &str = "pinglet://window-visibility";
+const EVENT_WINDOW_MOVED: &str = "pinglet://window-moved";
+const EVENT_NOTIFICATION_SHOW: &str = "pinglet://notification-show";
 const TRAY_ID: &str = "pinglet-tray";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_SETTINGS: &str = "settings";
@@ -48,7 +57,35 @@ const MAX_TITLE_CHARS: usize = 200;
 /// transcript 未找到时的负缓存有效期；新会话的 transcript 可能稍后才落盘。
 const TRANSCRIPT_MISS_CACHE_TTL: Duration = Duration::from_secs(30);
 /// 默认窗口宽度（逻辑像素），与 tauri.conf.json / 前端默认值保持一致。
-const DEFAULT_WINDOW_WIDTH_LOGICAL: f64 = 280.0;
+const DEFAULT_WINDOW_WIDTH_LOGICAL: f64 = 320.0;
+/// 托盘监视线程以 200ms 为粒度醒来，闪烁相位由 600ms 时间片决定；会话采集周期为 5 秒。
+/// NOTE: 隐藏窗口后 WebView2 会节流前端定时器，托盘与通知弹窗必须由 Rust 侧自行采集。
+const TRAY_MONITOR_TICK: Duration = Duration::from_millis(200);
+const TRAY_BLINK_PHASE: Duration = Duration::from_millis(600);
+const SESSION_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// 通知弹窗单条最多列举数与标题截断长度，避免内容过长。
+const NOTIFICATION_MAX_ITEMS: usize = 3;
+const NOTIFICATION_TITLE_MAX_CHARS: usize = 24;
+const NOTIFICATION_TITLE_PREFIX: &str = "Pinglet";
+/// 自绘通知弹窗：固定宽度（逻辑像素）、内容高度上下限、右下角边距与前端淡出后的兜底隐藏时长。
+const NOTIFICATION_WINDOW_WIDTH_LOGICAL: f64 = 380.0;
+const NOTIFICATION_WINDOW_MIN_HEIGHT_LOGICAL: f64 = 96.0;
+const NOTIFICATION_WINDOW_HEIGHT_LOGICAL: f64 = 176.0;
+const NOTIFICATION_WINDOW_MARGIN_LOGICAL: f64 = 16.0;
+const NOTIFICATION_AUTO_HIDE_FALLBACK: Duration = Duration::from_secs(5);
+/// 托盘合成图标：使用默认窗口图标的完整画布，圆环最细 3px 并随图标尺寸等比加粗。
+const TRAY_RING_MIN_THICKNESS: f64 = 3.0;
+const TRAY_RING_THICKNESS_DIVISOR: f64 = 10.0;
+/// 右下角实心角标：半径为短边的 24%，16px 托盘尺寸下仍有约 8px 直径，比细圆环醒目。
+const TRAY_BADGE_RADIUS_RATIO: f64 = 0.24;
+const TRAY_BADGE_MARGIN: f64 = 1.0;
+const ALERT_COLOR: [u8; 4] = [0xFF, 0x4D, 0x4F, 0xFF];
+const WORKING_COLOR: [u8; 4] = [0x2E, 0xD5, 0x73, 0xFF];
+/// 自动主题采样：窗口底边下方 6 逻辑像素处横向取 12 个点，取亮度中位数。
+const BACKDROP_SAMPLE_OFFSET_LOGICAL: f64 = 6.0;
+const BACKDROP_SAMPLE_COUNT: i32 = 12;
+/// 与 tauri-plugin-window-state 的默认文件名一致，用于判断是否已有可恢复的位置。
+const WINDOW_STATE_FILENAME: &str = tauri_plugin_window_state::DEFAULT_FILENAME;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -117,6 +154,280 @@ impl CachedTitle {
 static TITLE_CACHE: OnceLock<Mutex<HashMap<String, CachedTitle>>> = OnceLock::new();
 static TRANSCRIPT_MISS_CACHE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
+/// 与前端 `classify()` 一致的看板四态；托盘与通知只需要异常 / 进行中的聚合计数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoardKind {
+    Blocked,
+    Interrupted,
+    Working,
+    Done,
+}
+
+impl BoardKind {
+    fn classify(status: &str, alive: Option<bool>) -> Self {
+        // NOTE: 进程退出时无论最后状态是什么都归为已中断，与前端保持一致。
+        if alive == Some(false) {
+            return Self::Interrupted;
+        }
+        match status.to_ascii_lowercase().as_str() {
+            "waiting" | "blocked" => Self::Blocked,
+            "failed" | "crashed" | "stopped" => Self::Interrupted,
+            "idle" | "done" => Self::Done,
+            _ => Self::Working,
+        }
+    }
+
+    fn is_alert(self) -> bool {
+        matches!(self, Self::Blocked | Self::Interrupted)
+    }
+}
+
+struct AlertItem {
+    key: String,
+    title: String,
+    kind: BoardKind,
+}
+
+/// 通知弹窗中的一条告警；kind 决定状态文案的颜色。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationPopupItem {
+    title: String,
+    kind: &'static str,
+    status: &'static str,
+}
+
+/// 通知弹窗内容：标题汇总 + 最多三条明细 + 剩余数量。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationPopupPayload {
+    title: String,
+    items: Vec<NotificationPopupItem>,
+    more: Option<String>,
+}
+
+#[derive(Default)]
+struct SessionSnapshot {
+    blocked: usize,
+    interrupted: usize,
+    working: usize,
+    alert_keys: HashSet<String>,
+    alert_items: Vec<AlertItem>,
+}
+
+/// 与前端 `getRowKey()` 相同的身份规则，用于判断哪些警告是新增的。
+fn session_key(row: &SessionRow) -> String {
+    if let Some(pid) = row.pid {
+        return format!("pid:{pid}");
+    }
+    if let Some(cwd) = row.cwd.as_deref() {
+        return format!("cwd:{cwd}");
+    }
+    format!("name:{}", row.name)
+}
+
+/// 告警事件身份：会话身份 + 待处理状态时间戳。
+/// NOTE: 只用 session_key 无法区分「同一会话再次进入待处理」——当 waiting → busy → waiting
+/// 的 busy 间隔短于 5 秒轮询周期时，轮询看不到离开告警态的那一刻，alert_keys 永不释放，
+/// 第二次请求会被当成旧告警静默丢弃。待处理停留期间 statusUpdatedAt 不变，带上时间戳既能
+/// 识别新一次请求，也不会在同一次等待中重复弹窗。
+/// 已中断仍只用会话身份：进程已死，文件被重写不应再次唤醒弹窗。
+fn alert_event_key(row: &SessionRow, kind: BoardKind) -> String {
+    let key = session_key(row);
+    if kind == BoardKind::Blocked {
+        if let Some(timestamp) = row.status_updated_at {
+            return format!("{key}:{timestamp}");
+        }
+    }
+    key
+}
+
+fn build_snapshot(rows: &[SessionRow]) -> SessionSnapshot {
+    let mut snapshot = SessionSnapshot::default();
+    for row in rows {
+        let kind = BoardKind::classify(&row.status, row.alive);
+        match kind {
+            BoardKind::Blocked => snapshot.blocked += 1,
+            BoardKind::Interrupted => snapshot.interrupted += 1,
+            BoardKind::Working => snapshot.working += 1,
+            BoardKind::Done => {}
+        }
+        if kind.is_alert() {
+            let key = alert_event_key(row, kind);
+            snapshot.alert_keys.insert(key.clone());
+            snapshot.alert_items.push(AlertItem {
+                key,
+                title: row.title.clone(),
+                kind,
+            });
+        }
+    }
+    snapshot
+}
+
+fn tray_tooltip(blocked: usize, interrupted: usize, working: usize) -> String {
+    let mut parts = vec![NOTIFICATION_TITLE_PREFIX.to_string()];
+    if blocked > 0 {
+        parts.push(format!("{blocked} 待处理"));
+    }
+    if interrupted > 0 {
+        parts.push(format!("{interrupted} 已中断"));
+    }
+    if working > 0 {
+        parts.push(format!("{working} 进行中"));
+    }
+    parts.join(" · ")
+}
+
+fn notification_title(blocked: usize, interrupted: usize) -> String {
+    let total = blocked + interrupted;
+    if interrupted == 0 {
+        format!("{NOTIFICATION_TITLE_PREFIX} · {total} 个会话待处理")
+    } else if blocked == 0 {
+        format!("{NOTIFICATION_TITLE_PREFIX} · {total} 个会话已中断")
+    } else {
+        format!("{NOTIFICATION_TITLE_PREFIX} · {total} 个会话需要关注")
+    }
+}
+
+fn notification_popup_payload(
+    blocked: usize,
+    interrupted: usize,
+    items: &[AlertItem],
+) -> NotificationPopupPayload {
+    let total = items.len();
+    let rows = items
+        .iter()
+        .take(NOTIFICATION_MAX_ITEMS)
+        .map(|item| {
+            let (kind, status) = match item.kind {
+                BoardKind::Interrupted => ("interrupted", "已中断"),
+                _ => ("blocked", "等待确认"),
+            };
+            NotificationPopupItem {
+                title: truncate_notification_title(&item.title),
+                kind,
+                status,
+            }
+        })
+        .collect();
+    NotificationPopupPayload {
+        title: notification_title(blocked, interrupted),
+        items: rows,
+        more: (total > NOTIFICATION_MAX_ITEMS).then(|| format!("等 {total} 个会话")),
+    }
+}
+
+fn truncate_notification_title(title: &str) -> String {
+    match title.char_indices().nth(NOTIFICATION_TITLE_MAX_CHARS) {
+        Some((index, _)) => format!("{}…", &title[..index]),
+        None => title.to_string(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayIconKind {
+    Idle,
+    Working,
+    Alert,
+}
+
+/// 三种托盘图标在启动时一次合成，闪烁时只切换引用，不做重复缩放。
+struct TrayIcons {
+    idle: Image<'static>,
+    working: Image<'static>,
+    alert: Image<'static>,
+}
+
+impl TrayIcons {
+    fn get(&self, kind: TrayIconKind) -> &Image<'static> {
+        match kind {
+            TrayIconKind::Idle => &self.idle,
+            TrayIconKind::Working => &self.working,
+            TrayIconKind::Alert => &self.alert,
+        }
+    }
+}
+
+fn build_tray_icons(base: &Image<'_>) -> TrayIcons {
+    TrayIcons {
+        idle: build_tray_icon(base, None),
+        working: build_tray_icon(base, Some(WORKING_COLOR)),
+        alert: build_tray_icon(base, Some(ALERT_COLOR)),
+    }
+}
+
+/// 托盘当前展示的计数与上次写入的图标 / tooltip，避免每 200ms 重复设置。
+struct TrayRuntime {
+    blocked: usize,
+    interrupted: usize,
+    working: usize,
+    alert_keys: HashSet<String>,
+    last_icon: Option<TrayIconKind>,
+    last_tooltip: Option<String>,
+}
+
+impl Default for TrayRuntime {
+    fn default() -> Self {
+        Self {
+            blocked: 0,
+            interrupted: 0,
+            working: 0,
+            alert_keys: HashSet::new(),
+            last_icon: Some(TrayIconKind::Idle),
+            last_tooltip: Some(NOTIFICATION_TITLE_PREFIX.to_string()),
+        }
+    }
+}
+
+/// 保持默认窗口图标的完整尺寸，并叠加状态色：边缘圆环 + 右下角实心角标。
+/// NOTE: 16px 托盘下圆环会被缩到约 1.5px，单靠圆环在深色任务栏上不够醒目；
+/// 实心角标缩后仍有约 8px 直径，进行中与告警状态都能一眼辨识。
+fn build_tray_icon(base: &Image<'_>, ring_color: Option<[u8; 4]>) -> Image<'static> {
+    let width = base.width();
+    let height = base.height();
+    let source = base.rgba();
+    let expected_len = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || source.len() < expected_len {
+        return base.clone().to_owned();
+    }
+
+    let mut pixels = source[..expected_len].to_vec();
+
+    if let Some(color) = ring_color {
+        let short_side = width.min(height) as f64;
+        let center_x = width as f64 / 2.0;
+        let center_y = height as f64 / 2.0;
+        let outer_radius = short_side / 2.0;
+        let thickness = TRAY_RING_MIN_THICKNESS.max(short_side / TRAY_RING_THICKNESS_DIVISOR);
+        let inner_radius = (outer_radius - thickness).max(0.0);
+        let badge_radius = short_side * TRAY_BADGE_RADIUS_RATIO;
+        let badge_center_x = width as f64 - badge_radius - TRAY_BADGE_MARGIN;
+        let badge_center_y = height as f64 - badge_radius - TRAY_BADGE_MARGIN;
+        for y in 0..height {
+            for x in 0..width {
+                let pixel_x = x as f64 + 0.5;
+                let pixel_y = y as f64 + 0.5;
+                let distance_x = pixel_x - center_x;
+                let distance_y = pixel_y - center_y;
+                let distance = (distance_x * distance_x + distance_y * distance_y).sqrt();
+                let in_ring = distance <= outer_radius && distance >= inner_radius;
+                let badge_distance_x = pixel_x - badge_center_x;
+                let badge_distance_y = pixel_y - badge_center_y;
+                let in_badge = badge_distance_x * badge_distance_x
+                    + badge_distance_y * badge_distance_y
+                    <= badge_radius * badge_radius;
+                if in_ring || in_badge {
+                    let index = ((y * width + x) * 4) as usize;
+                    pixels[index..index + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+
+    Image::new_owned(pixels, width, height)
+}
+
 /// 当前吸附在哪些边缘；用于拖出时保持迟滞，避免每帧都被吸回。
 #[derive(Clone, Copy, Default)]
 struct SnapEdges {
@@ -131,23 +442,42 @@ struct AppState {
     close_to_tray: AtomicBool,
     click_through: AtomicBool,
     tray_ready: AtomicBool,
+    system_notifications: AtomicBool,
+    do_not_disturb: AtomicBool,
+    tray_alert_unread: AtomicBool,
+    window_active: AtomicBool,
     show_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     click_through_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     current_shortcut: Mutex<Option<Shortcut>>,
     snapped_edges: Mutex<SnapEdges>,
+    tray_runtime: Mutex<TrayRuntime>,
+    tray_icons: Mutex<Option<TrayIcons>>,
+    notification_payload: Mutex<Option<NotificationPopupPayload>>,
+    /// 每次显示 / 主动隐藏都递增，作废旧的自绘弹窗兜底隐藏计时。
+    notification_generation: AtomicU64,
+    monitor_stop: AtomicBool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            // 与前端默认设置保持一致；启动后前端会用持久化值覆盖。
-            close_to_tray: AtomicBool::new(false),
+            // 与前端默认设置保持一致（默认开启点击关闭时最小化到托盘）；启动后前端会用持久化值覆盖。
+            close_to_tray: AtomicBool::new(true),
             click_through: AtomicBool::new(false),
             tray_ready: AtomicBool::new(false),
+            system_notifications: AtomicBool::new(true),
+            do_not_disturb: AtomicBool::new(false),
+            tray_alert_unread: AtomicBool::new(false),
+            window_active: AtomicBool::new(true),
             show_item: Mutex::new(None),
             click_through_item: Mutex::new(None),
             current_shortcut: Mutex::new(None),
             snapped_edges: Mutex::new(SnapEdges::default()),
+            tray_runtime: Mutex::new(TrayRuntime::default()),
+            tray_icons: Mutex::new(None),
+            notification_payload: Mutex::new(None),
+            notification_generation: AtomicU64::new(0),
+            monitor_stop: AtomicBool::new(false),
         }
     }
 }
@@ -156,6 +486,11 @@ impl Default for AppState {
 /// NOTE: 异步命令会在线程池执行，避免文件扫描阻塞主线程。
 #[tauri::command(async)]
 fn list_sessions() -> ListResult {
+    collect_sessions()
+}
+
+/// 前端轮询与后台托盘监控共用的扫描入口。
+fn collect_sessions() -> ListResult {
     let mut rows = Vec::new();
     let mut errors = Vec::new();
 
@@ -849,6 +1184,123 @@ fn set_global_shortcut(
     Ok(())
 }
 
+/// 前端设置变化时同步免打扰与通知消息开关，托盘闪烁立即按新状态生效。
+#[tauri::command]
+fn set_notification_preferences(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    system_notifications: bool,
+    do_not_disturb: bool,
+) {
+    state
+        .system_notifications
+        .store(system_notifications, Ordering::Relaxed);
+    let previous_dnd = state.do_not_disturb.swap(do_not_disturb, Ordering::Relaxed);
+    // 关闭免打扰时重新评估当前告警：窗口仍隐藏且仍有告警，则恢复未读闪烁
+    if previous_dnd && !do_not_disturb && !state.window_active.load(Ordering::Relaxed) {
+        let has_alert = state
+            .tray_runtime
+            .lock()
+            .map(|runtime| runtime.blocked + runtime.interrupted > 0)
+            .unwrap_or(false);
+        if has_alert {
+            state.tray_alert_unread.store(true, Ordering::Relaxed);
+        }
+    }
+    refresh_tray(&app, false);
+}
+
+/// 恢复默认位置（主屏右上角）并把位置写回 window-state，下次启动不再使用旧坐标。
+#[tauri::command]
+fn reset_window_position(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Err("主窗口不可用".to_string());
+    };
+
+    position_window_top_right(&window);
+    // NOTE: set_position 是投递到事件循环的异步消息；用一次同步 getter 等待它生效，
+    // 再写状态文件，避免保存到重置前的坐标。
+    let _ = window.outer_position();
+    app.save_window_state(StateFlags::POSITION)
+        .map_err(|err| format!("保存窗口位置失败: {err}"))
+}
+
+/// 采样窗口正下方（工作区内）的背景亮度，供自动主题判定深浅色。
+/// NOTE: 窗口贴近工作区底边或采样点无效时返回 None，前端保持当前主题。
+#[tauri::command]
+fn sample_backdrop_luminance(window: tauri::WebviewWindow) -> Option<f32> {
+    #[cfg(target_os = "windows")]
+    {
+        sample_backdrop_luminance_windows(&window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+fn median_luminance(samples: &mut [f32]) -> Option<f32> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_by(f32::total_cmp);
+    let middle = samples.len() / 2;
+    if samples.len() % 2 == 0 {
+        Some((samples[middle - 1] + samples[middle]) / 2.0)
+    } else {
+        Some(samples[middle])
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn sample_backdrop_luminance_windows(window: &tauri::WebviewWindow) -> Option<f32> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    let monitor = window.current_monitor().ok()??;
+    let work_area = monitor.work_area();
+    let work_left = work_area.position.x;
+    let work_top = work_area.position.y;
+    let work_right = work_left + work_area.size.width as i32;
+    let work_bottom = work_top + work_area.size.height as i32;
+
+    let offset = (BACKDROP_SAMPLE_OFFSET_LOGICAL * monitor.scale_factor()).round() as i32;
+    let sample_y = position.y + size.height as i32 + offset;
+    if sample_y < work_top || sample_y >= work_bottom {
+        return None;
+    }
+
+    let window_left = position.x.max(work_left);
+    let window_right = (position.x + size.width as i32).min(work_right);
+    if window_right <= window_left {
+        return None;
+    }
+
+    let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
+    if screen_dc.is_null() {
+        return None;
+    }
+
+    let span = window_right - window_left;
+    let mut samples = Vec::with_capacity(BACKDROP_SAMPLE_COUNT as usize);
+    for index in 0..BACKDROP_SAMPLE_COUNT {
+        let offset_x =
+            (span as f64 * (index as f64 + 0.5) / f64::from(BACKDROP_SAMPLE_COUNT)) as i32;
+        let sample_x = (window_left + offset_x).clamp(work_left, work_right - 1);
+        let color = unsafe { GetPixel(screen_dc, sample_x, sample_y) };
+        if color == CLR_INVALID {
+            continue;
+        }
+        let red = (color & 0xFF) as f32 / 255.0;
+        let green = ((color >> 8) & 0xFF) as f32 / 255.0;
+        let blue = ((color >> 16) & 0xFF) as f32 / 255.0;
+        samples.push(0.2126 * red + 0.7152 * green + 0.0722 * blue);
+    }
+    unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
+
+    median_luminance(&mut samples)
+}
+
 fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show_item = CheckMenuItemBuilder::with_id(TRAY_MENU_SHOW, "显示")
         .checked(true)
@@ -862,14 +1314,15 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .items(&[&show_item, &click_through_item, &settings_item, &quit_item])
         .build()?;
 
-    let icon = app
+    let default_icon = app
         .default_window_icon()
         .cloned()
         .ok_or_else(|| tauri::Error::AssetNotFound("默认窗口图标".to_string()))?;
+    let tray_icons = build_tray_icons(&default_icon);
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon)
-        .tooltip("Pinglet")
+        .icon(tray_icons.idle.clone())
+        .tooltip(NOTIFICATION_TITLE_PREFIX)
         .show_menu_on_left_click(false)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -897,14 +1350,20 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    let state = app.state::<AppState>();
-    if let Ok(mut item) = state.show_item.lock() {
-        *item = Some(show_item);
+    {
+        let state = app.state::<AppState>();
+        if let Ok(mut item) = state.show_item.lock() {
+            *item = Some(show_item);
+        }
+        if let Ok(mut item) = state.click_through_item.lock() {
+            *item = Some(click_through_item);
+        }
+        if let Ok(mut icons) = state.tray_icons.lock() {
+            *icons = Some(tray_icons);
+        }
+        state.tray_ready.store(true, Ordering::Relaxed);
     }
-    if let Ok(mut item) = state.click_through_item.lock() {
-        *item = Some(click_through_item);
-    }
-    state.tray_ready.store(true, Ordering::Relaxed);
+    refresh_tray(app, false);
 
     Ok(())
 }
@@ -920,20 +1379,72 @@ fn sync_show_item(state: &AppState, visible: bool) {
     }
 }
 
-/// 托盘「显示」菜单：只切换窗口显隐，勾选状态跟随实际可见性。
-fn toggle_window_visibility(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
+/// 读取窗口真实显隐并广播给前端；窗口回到前台时清除托盘未读提醒。
+/// NOTE: Windows 上 WebView2 在窗口隐藏后会节流后台计时器，前端因此不能作为
+/// 显隐的权威来源；轮询与心跳的启停统一由这里发出的 `pinglet://window-visibility` 决定。
+fn sync_window_activity(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let visible = window.is_visible().unwrap_or(false);
+    let active = visible && !window.is_minimized().unwrap_or(false);
+
+    let state = app.state::<AppState>();
+    let previous = state.window_active.swap(active, Ordering::Relaxed);
+    sync_show_item(&state, visible);
+
+    if active && state.tray_alert_unread.swap(false, Ordering::Relaxed) {
+        refresh_tray(app, false);
+    }
+
+    if previous != active {
+        if let Err(err) = window.emit(EVENT_WINDOW_VISIBILITY, active) {
+            eprintln!("pinglet: 广播窗口可见性失败: {err}");
+        }
+    }
+}
+
+/// 显示并聚焦主窗口：穿透状态下恢复可点击，最小化时先还原。
+fn show_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
     let state = app.state::<AppState>();
 
-    let is_visible = match window.is_visible() {
+    // 穿透状态下窗口收不到任何点击，必须先恢复可点击
+    if state.click_through.load(Ordering::Relaxed) {
+        if let Err(err) = apply_click_through(app, &state, false) {
+            eprintln!("pinglet: 关闭鼠标穿透失败: {err}");
+        }
+    }
+    if window.is_minimized().unwrap_or(false) {
+        if let Err(err) = window.unminimize() {
+            eprintln!("pinglet: 还原窗口失败: {err}");
+        }
+    }
+    if let Err(err) = window.show() {
+        eprintln!("pinglet: 显示窗口失败: {err}");
+        return;
+    }
+    if let Err(err) = window.set_focus() {
+        eprintln!("pinglet: 聚焦窗口失败: {err}");
+    }
+    sync_window_activity(app);
+}
+
+/// 托盘「显示」菜单：只切换窗口显隐，勾选状态跟随实际可见性。
+fn toggle_window_visibility(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+
+    match window.is_visible() {
         Ok(true) => {
             if let Err(err) = window.hide() {
                 eprintln!("pinglet: 隐藏窗口失败: {err}");
-                return;
+            } else {
+                sync_window_activity(app);
             }
-            false
         }
         Ok(false) => {
             if let Err(err) = window.show() {
@@ -943,60 +1454,35 @@ fn toggle_window_visibility(app: &tauri::AppHandle) {
             if let Err(err) = window.set_focus() {
                 eprintln!("pinglet: 聚焦窗口失败: {err}");
             }
-            true
+            sync_window_activity(app);
         }
-        Err(err) => {
-            eprintln!("pinglet: 读取窗口可见性失败: {err}");
-            return;
-        }
-    };
-
-    sync_show_item(&state, is_visible);
+        Err(err) => eprintln!("pinglet: 读取窗口可见性失败: {err}"),
+    }
 }
 
 /// 托盘「设置」菜单：显示窗口并打开设置面板；穿透状态下先关闭穿透，否则面板无法点击。
 fn open_settings(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let state = app.state::<AppState>();
-
-    if state.click_through.load(Ordering::Relaxed) {
-        if let Err(err) = apply_click_through(app, &state, false) {
-            eprintln!("pinglet: 关闭鼠标穿透失败: {err}");
-        }
-    }
-    if let Err(err) = window.show() {
-        eprintln!("pinglet: 显示窗口失败: {err}");
-    } else {
-        sync_show_item(&state, true);
-    }
-    if let Err(err) = window.set_focus() {
-        eprintln!("pinglet: 聚焦窗口失败: {err}");
-    }
+    show_main_window(app);
     if let Err(err) = app.emit("pinglet://open-settings", ()) {
         eprintln!("pinglet: 广播打开设置失败: {err}");
     }
 }
 
 fn toggle_main_window(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    let state = app.state::<AppState>();
 
+    // 最小化时 is_visible() 仍为 true，先还原而不是隐藏
+    if window.is_minimized().unwrap_or(false) {
+        show_main_window(app);
+        return;
+    }
+
+    let state = app.state::<AppState>();
     // 穿透状态下窗口收不到任何点击，托盘左键与全局快捷键优先恢复可点击状态
     if state.click_through.load(Ordering::Relaxed) {
-        if let Err(err) = apply_click_through(app, &state, false) {
-            eprintln!("pinglet: 恢复鼠标穿透失败: {err}");
-        }
-        if let Err(err) = window.show() {
-            eprintln!("pinglet: 显示窗口失败: {err}");
-        }
-        if let Err(err) = window.set_focus() {
-            eprintln!("pinglet: 聚焦窗口失败: {err}");
-        }
-        sync_show_item(&state, true);
+        show_main_window(app);
         return;
     }
 
@@ -1005,21 +1491,157 @@ fn toggle_main_window(app: &tauri::AppHandle) {
             if let Err(err) = window.hide() {
                 eprintln!("pinglet: 隐藏窗口失败: {err}");
             } else {
-                sync_show_item(&state, false);
+                sync_window_activity(app);
             }
         }
-        Ok(false) => {
-            if let Err(err) = window.show() {
-                eprintln!("pinglet: 显示窗口失败: {err}");
-            } else {
-                sync_show_item(&state, true);
-            }
-            if let Err(err) = window.set_focus() {
-                eprintln!("pinglet: 聚焦窗口失败: {err}");
-            }
-        }
+        Ok(false) => show_main_window(app),
         Err(err) => eprintln!("pinglet: 读取窗口可见性失败: {err}"),
     }
+}
+
+/// 根据当前计数与闪烁相位更新托盘图标与 tooltip，只在内容变化时写入。
+fn refresh_tray(app: &tauri::AppHandle, blink_dim: bool) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let dnd = state.do_not_disturb.load(Ordering::Relaxed);
+    let unread = state.tray_alert_unread.load(Ordering::Relaxed);
+    let active = state.window_active.load(Ordering::Relaxed);
+
+    let Ok(icons_guard) = state.tray_icons.lock() else {
+        return;
+    };
+    let Some(icons) = icons_guard.as_ref() else {
+        return;
+    };
+    let Ok(mut runtime) = state.tray_runtime.lock() else {
+        return;
+    };
+
+    let has_alert = runtime.blocked + runtime.interrupted > 0;
+    let blinking = has_alert && unread && !dnd && !active;
+    let kind = if has_alert {
+        if blinking && blink_dim {
+            TrayIconKind::Idle
+        } else {
+            TrayIconKind::Alert
+        }
+    } else if runtime.working > 0 {
+        TrayIconKind::Working
+    } else {
+        TrayIconKind::Idle
+    };
+
+    if runtime.last_icon != Some(kind) {
+        match tray.set_icon(Some(icons.get(kind).clone())) {
+            Ok(()) => runtime.last_icon = Some(kind),
+            Err(err) => eprintln!("pinglet: 更新托盘图标失败: {err}"),
+        }
+    }
+
+    let tooltip = tray_tooltip(runtime.blocked, runtime.interrupted, runtime.working);
+    if runtime.last_tooltip.as_deref() != Some(tooltip.as_str()) {
+        match tray.set_tooltip(Some(tooltip.as_str())) {
+            Ok(()) => runtime.last_tooltip = Some(tooltip),
+            Err(err) => eprintln!("pinglet: 更新托盘提示失败: {err}"),
+        }
+    }
+}
+
+/// 启动后台会话监控：Rust 侧独立轮询，不依赖会被 WebView2 节流的 JS 计时器。
+fn spawn_session_monitor(app: tauri::AppHandle) {
+    let thread_app = app.clone();
+    if let Err(err) = std::thread::Builder::new()
+        .name("pinglet-session-monitor".to_string())
+        .spawn(move || session_monitor_loop(thread_app))
+    {
+        eprintln!("pinglet: 启动会话监控线程失败: {err}");
+    }
+}
+
+fn session_monitor_loop(app: tauri::AppHandle) {
+    let mut first_scan = true;
+    let mut last_poll: Option<Instant> = None;
+    let mut last_blink = Instant::now();
+    let mut blink_dim = false;
+
+    loop {
+        if app.state::<AppState>().monitor_stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let now = Instant::now();
+        let should_poll = match last_poll {
+            None => true,
+            Some(last) => now.duration_since(last) >= SESSION_MONITOR_INTERVAL,
+        };
+        if should_poll {
+            last_poll = Some(now);
+            let snapshot = build_snapshot(&collect_sessions().rows);
+            poll_session_state(&app, snapshot, &mut first_scan);
+        }
+
+        if now.duration_since(last_blink) >= TRAY_BLINK_PHASE {
+            last_blink = now;
+            blink_dim = !blink_dim;
+            refresh_tray(&app, blink_dim);
+        }
+
+        std::thread::sleep(TRAY_MONITOR_TICK);
+    }
+}
+
+fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_scan: &mut bool) {
+    sync_window_activity(app);
+
+    let state = app.state::<AppState>();
+    let active = state.window_active.load(Ordering::Relaxed);
+    let dnd = state.do_not_disturb.load(Ordering::Relaxed);
+    let system_notifications = state.system_notifications.load(Ordering::Relaxed);
+
+    let new_alerts: Vec<AlertItem> = {
+        let Ok(mut runtime) = state.tray_runtime.lock() else {
+            return;
+        };
+        let new_alerts = snapshot
+            .alert_items
+            .iter()
+            .filter(|item| !runtime.alert_keys.contains(&item.key))
+            .map(|item| AlertItem {
+                key: item.key.clone(),
+                title: item.title.clone(),
+                kind: item.kind,
+            })
+            .collect();
+        runtime.blocked = snapshot.blocked;
+        runtime.interrupted = snapshot.interrupted;
+        runtime.working = snapshot.working;
+        runtime.alert_keys = snapshot.alert_keys;
+        new_alerts
+    };
+
+    let has_alert = snapshot.blocked + snapshot.interrupted > 0;
+    if !has_alert {
+        state.tray_alert_unread.store(false, Ordering::Relaxed);
+    } else if !*first_scan && !active && !dnd && !new_alerts.is_empty() {
+        state.tray_alert_unread.store(true, Ordering::Relaxed);
+    }
+
+    // 首次扫描只播种，避免启动时把历史告警全部弹成通知。
+    // NOTE: 待处理告警的去重键带状态时间戳（见 alert_event_key），每次新的等待请求都会
+    // 进入 new_alerts，即使中间的 busy 状态短于轮询周期也能识别；同一次等待不会重复弹。
+    // 因此不设全局冷却——否则同一会话短时间内第二次告警会被静默丢弃。
+    if !*first_scan && system_notifications && !dnd && !active && !new_alerts.is_empty() {
+        let payload =
+            notification_popup_payload(snapshot.blocked, snapshot.interrupted, &new_alerts);
+        if let Err(err) = show_notification_popup(app, payload) {
+            eprintln!("pinglet: 显示通知弹窗失败: {err}");
+        }
+    }
+
+    *first_scan = false;
+    refresh_tray(app, false);
 }
 
 /// 窗口可移动到的四条极限位置（物理像素）。
@@ -1428,9 +2050,345 @@ fn position_window_top_right(window: &tauri::WebviewWindow) {
     }
 }
 
+/// 恢复的位置可能来自已断开的显示器；必要时平移回当前显示器工作区。
+fn clamp_window_into_work_area(window: &tauri::WebviewWindow) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => Some(monitor),
+        _ => window.primary_monitor().ok().flatten(),
+    };
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let work_area = monitor.work_area();
+    let left = work_area.position.x;
+    let top = work_area.position.y;
+    let right = left + work_area.size.width as i32;
+    let bottom = top + work_area.size.height as i32;
+    let width = size.width as i32;
+    let height = size.height as i32;
+
+    let x = position.x.clamp(left, (right - width).max(left));
+    let y = position.y.clamp(top, (bottom - height).max(top));
+    if x != position.x || y != position.y {
+        if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
+            eprintln!("pinglet: 修正窗口位置失败: {err}");
+        }
+    }
+}
+
+/// 通知弹窗贴主屏工作区右下角（任务栏上方）；工作区不足时退回左上角。
+fn resolve_notification_position(
+    work_left: i32,
+    work_top: i32,
+    work_width: i32,
+    work_height: i32,
+    window_width: i32,
+    window_height: i32,
+    margin: i32,
+) -> (i32, i32) {
+    let max_x = work_left + (work_width - window_width).max(0);
+    let max_y = work_top + (work_height - window_height).max(0);
+    (
+        (max_x - margin).max(work_left),
+        (max_y - margin).max(work_top),
+    )
+}
+
+fn position_notification_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let monitor = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let scale = monitor.scale_factor();
+    let (window_width, window_height) = window
+        .outer_size()
+        .map(|size| (size.width as i32, size.height as i32))
+        .unwrap_or_else(|_| {
+            (
+                (NOTIFICATION_WINDOW_WIDTH_LOGICAL * scale).round() as i32,
+                (NOTIFICATION_WINDOW_HEIGHT_LOGICAL * scale).round() as i32,
+            )
+        });
+    position_notification_window_sized(app, window, window_width, window_height);
+}
+
+/// 以物理尺寸把弹窗贴到主屏工作区右下角；尺寸可能来自前端实测内容高度。
+fn position_notification_window_sized(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    window_width: i32,
+    window_height: i32,
+) {
+    let monitor = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let margin = (NOTIFICATION_WINDOW_MARGIN_LOGICAL * scale).round() as i32;
+    let (x, y) = resolve_notification_position(
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width as i32,
+        work_area.size.height as i32,
+        window_width,
+        window_height,
+        margin,
+    );
+
+    if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
+        eprintln!("pinglet: 定位通知弹窗失败: {err}");
+    }
+}
+
+/// 首次弹窗时按需创建窗口，之后复用同一个隐藏窗口。
+/// 窗口不抢焦点、不进任务栏，透明无边框，只由 Pinglet 控制显示与隐藏。
+fn ensure_notification_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
+        return Ok(window);
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        NOTIFICATION_WINDOW_LABEL,
+        WebviewUrl::App("notification.html".into()),
+    )
+    .title(NOTIFICATION_TITLE_PREFIX)
+    .inner_size(
+        NOTIFICATION_WINDOW_WIDTH_LOGICAL,
+        NOTIFICATION_WINDOW_HEIGHT_LOGICAL,
+    )
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|err| format!("创建通知弹窗失败: {err}"))?;
+
+    // NOTE: 仅 focused(false) 只影响首次创建，后续 show() 仍会抢焦点；
+    // 关闭可聚焦性让窗口带上 WS_EX_NOACTIVATE，点击时不会激活。
+    if let Err(err) = window.set_focusable(false) {
+        eprintln!("pinglet: 设置通知弹窗不可聚焦失败: {err}");
+    }
+    Ok(window)
+}
+
+/// 同步 WebView2 控制器的可见性。
+/// NOTE: 裸 `ShowWindow` 只改变原生窗口，WebView2 仍认为页面可见：隐藏期间渲染器可能被
+/// 遮挡检测挂起，再次显示时不再出帧（空白卡片）。显式切换控制器可见性让渲染器随窗口
+/// 一起暂停与恢复，第二次及之后的弹窗才能正常绘制新内容。
+#[cfg(target_os = "windows")]
+fn set_notification_webview_visible(window: &tauri::WebviewWindow, visible: bool) {
+    let dispatched = window.with_webview(move |platform| {
+        // SAFETY: controller 属于仍存活的 webview；with_webview 回调在主线程执行。
+        if let Err(err) = unsafe { platform.controller().SetIsVisible(visible) } {
+            eprintln!("pinglet: 同步通知弹窗渲染可见性失败: {err}");
+        }
+    });
+    if let Err(err) = dispatched {
+        eprintln!("pinglet: 派发通知弹窗渲染可见性失败: {err}");
+    }
+}
+
+/// 以 `SW_SHOWNOACTIVATE` 显示通知弹窗。
+/// WARN: 不能用 `window.show()`——tao 创建后会清除 MARKER_DONT_FOCUS，show() 走 SW_SHOW，
+/// 即使窗口带 WS_EX_NOACTIVATE 也会被设为前台，抢走用户当前应用的焦点。
+fn show_notification_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|err| format!("获取通知弹窗句柄失败: {err}"))?;
+        // SAFETY: hwnd 来自仍存活的 WebviewWindow，仅执行窗口显示且不激活窗口。
+        unsafe {
+            let _ = ShowWindow(hwnd.0 as _, SW_SHOWNOACTIVATE);
+        }
+        set_notification_webview_visible(window, true);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .show()
+            .map_err(|err| format!("显示通知弹窗失败: {err}"))
+    }
+}
+
+/// 用裸 `ShowWindow(SW_HIDE)` 隐藏通知弹窗。
+/// WARN: 不能用 `window.hide()`——显示走的是裸 `ShowWindow`，tao 的 `WindowFlags::VISIBLE`
+/// 始终为 false，`hide()` 的 `apply_diff` 因 diff 为空直接返回，窗口不会真正隐藏。
+fn hide_notification_window_raw(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|err| format!("获取通知弹窗句柄失败: {err}"))?;
+        set_notification_webview_visible(window, false);
+        // SAFETY: hwnd 来自仍存活的 WebviewWindow；ShowWindow 允许从兜底线程调用。
+        unsafe {
+            let _ = ShowWindow(hwnd.0 as _, SW_HIDE);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .hide()
+            .map_err(|err| format!("隐藏通知弹窗失败: {err}"))
+    }
+}
+
+/// 更新内容并显示通知弹窗；前端负责 3 秒淡出，Rust 侧另有兜底隐藏。
+fn show_notification_popup(
+    app: &tauri::AppHandle,
+    payload: NotificationPopupPayload,
+) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut slot = state
+            .notification_payload
+            .lock()
+            .map_err(|_| "通知内容锁不可用".to_string())?;
+        *slot = Some(payload);
+    }
+
+    let window = ensure_notification_window(app)?;
+    position_notification_window(app, &window);
+    show_notification_window(&window)?;
+    // NOTE: 首次创建时事件可能早于页面加载；页面加载后会主动调用 get_notification_payload。
+    if let Err(err) = window.emit(EVENT_NOTIFICATION_SHOW, ()) {
+        eprintln!("pinglet: 广播通知内容失败: {err}");
+    }
+    schedule_notification_auto_hide(app);
+    Ok(())
+}
+
+/// 兜底隐藏：前端 3 秒淡出未生效时，5 秒后由 Rust 收起；再次弹窗会作废旧计时。
+fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
+    let generation = app
+        .state::<AppState>()
+        .notification_generation
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    let thread_app = app.clone();
+    let result = std::thread::Builder::new()
+        .name("pinglet-notification-hide".to_string())
+        .spawn(move || {
+            std::thread::sleep(NOTIFICATION_AUTO_HIDE_FALLBACK);
+            if thread_app
+                .state::<AppState>()
+                .notification_generation
+                .load(Ordering::Relaxed)
+                != generation
+            {
+                return;
+            }
+            if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
+                if let Err(err) = hide_notification_window_raw(&window) {
+                    eprintln!("pinglet: 自动隐藏通知弹窗失败: {err}");
+                }
+            }
+        });
+    if let Err(err) = result {
+        eprintln!("pinglet: 启动通知隐藏计时失败: {err}");
+    }
+}
+
+/// 通知弹窗加载时读取最新内容；窗口复用时通过事件触发重新读取。
+#[tauri::command]
+fn get_notification_payload(state: tauri::State<'_, AppState>) -> Option<NotificationPopupPayload> {
+    state
+        .notification_payload
+        .lock()
+        .ok()
+        .and_then(|payload| payload.clone())
+}
+
+/// 前端点击关闭或倒计时结束后调用；递增代号让 Rust 兜底计时提前失效。
+#[tauri::command]
+fn hide_notification_window(app: tauri::AppHandle) {
+    app.state::<AppState>()
+        .notification_generation
+        .fetch_add(1, Ordering::Relaxed);
+    if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
+        if let Err(err) = hide_notification_window_raw(&window) {
+            eprintln!("pinglet: 隐藏通知弹窗失败: {err}");
+        }
+    }
+}
+
+/// 点击通知卡片：收起弹窗并唤起主窗口。
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) {
+    hide_notification_window(app.clone());
+    show_main_window(&app);
+}
+
+/// 前端按内容实测高度调整弹窗，避免透明空白区域遮挡桌面点击。
+#[tauri::command]
+fn resize_notification_window(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window(NOTIFICATION_WINDOW_LABEL)
+        .ok_or_else(|| "通知弹窗尚未创建".to_string())?;
+    let scale = window
+        .scale_factor()
+        .map_err(|err| format!("读取通知弹窗缩放失败: {err}"))?;
+    let clamped = height.clamp(
+        NOTIFICATION_WINDOW_MIN_HEIGHT_LOGICAL,
+        NOTIFICATION_WINDOW_HEIGHT_LOGICAL,
+    );
+    let physical_width = (NOTIFICATION_WINDOW_WIDTH_LOGICAL * scale).round() as u32;
+    let physical_height = (clamped * scale).round() as u32;
+    window
+        .set_size(tauri::PhysicalSize::new(physical_width, physical_height))
+        .map_err(|err| format!("调整通知弹窗尺寸失败: {err}"))?;
+    position_notification_window_sized(
+        &app,
+        &window,
+        physical_width as i32,
+        physical_height as i32,
+    );
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // NOTE: 单实例插件必须最先注册；第二次启动时回调拿到的是已运行实例的 AppHandle。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
+        // 只记忆位置：尺寸由前端按内容自适应并持久化在 localStorage。
+        // NOTE: 通知弹窗由 Pinglet 自己定位，不能进入 window-state 的位置存档。
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::POSITION)
+                .with_denylist(&[NOTIFICATION_WINDOW_LABEL])
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -1449,37 +2407,59 @@ pub fn run() {
             if let Err(err) = create_tray(app.handle()) {
                 eprintln!("pinglet: 创建托盘失败: {err}");
             }
-            if let Some(window) = app.get_webview_window("main") {
-                position_window_top_right(&window);
+
+            if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+                // NOTE: window-state 已在窗口 ready 时恢复位置；只有没有存档时才回到默认位置。
+                let state_path = app
+                    .path()
+                    .app_config_dir()
+                    .ok()
+                    .map(|dir| dir.join(WINDOW_STATE_FILENAME));
+                if state_path.is_some_and(|path| path.is_file()) {
+                    clamp_window_into_work_area(&window);
+                } else {
+                    position_window_top_right(&window);
+                }
                 if let Err(err) = window.show() {
                     eprintln!("pinglet: 显示主窗口失败: {err}");
                 }
-                let state = app.state::<AppState>();
-                if let Ok(visible) = window.is_visible() {
-                    sync_show_item(&state, visible);
-                }
+                sync_window_activity(app.handle());
             }
+
+            spawn_session_monitor(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            WindowEvent::CloseRequested { api, .. } => {
-                let state = window.state::<AppState>();
-                if state.close_to_tray.load(Ordering::Relaxed)
-                    && state.tray_ready.load(Ordering::Relaxed)
-                {
-                    api.prevent_close();
-                    if let Err(err) = window.hide() {
-                        eprintln!("pinglet: 隐藏到托盘失败: {err}");
-                    } else {
-                        sync_show_item(&state, false);
-                    }
-                } else {
-                    // 关闭行为设为“退出”时，X 按钮要结束整个应用，而不是留下托盘空转
-                    window.app_handle().exit(0);
-                }
+        .on_window_event(|window, event| {
+            // NOTE: 通知弹窗不参与主窗口的关闭、边缘吸附与活跃度逻辑。
+            if window.label() != WINDOW_LABEL {
+                return;
             }
-            WindowEvent::Moved(_) => snap_window_to_edges(window),
-            _ => {}
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    let state = window.state::<AppState>();
+                    if state.close_to_tray.load(Ordering::Relaxed)
+                        && state.tray_ready.load(Ordering::Relaxed)
+                    {
+                        api.prevent_close();
+                        if let Err(err) = window.hide() {
+                            eprintln!("pinglet: 隐藏到托盘失败: {err}");
+                        } else {
+                            sync_window_activity(&window.app_handle());
+                        }
+                    } else {
+                        // 关闭行为设为“退出”时，X 按钮要结束整个应用，而不是留下托盘空转
+                        window.app_handle().exit(0);
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    snap_window_to_edges(window);
+                    if let Err(err) = window.emit(EVENT_WINDOW_MOVED, ()) {
+                        eprintln!("pinglet: 广播窗口移动失败: {err}");
+                    }
+                }
+                WindowEvent::Resized(_) => sync_window_activity(&window.app_handle()),
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
@@ -1487,12 +2467,26 @@ pub fn run() {
             quit_app,
             set_close_to_tray,
             set_click_through,
+            set_notification_preferences,
+            get_notification_payload,
+            hide_notification_window,
+            open_main_window,
+            resize_notification_window,
+            reset_window_position,
+            sample_backdrop_luminance,
             is_autostart_enabled,
             set_autostart,
             set_global_shortcut
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                app.state::<AppState>()
+                    .monitor_stop
+                    .store(true, Ordering::Relaxed);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1711,5 +2705,230 @@ mod tests {
         );
         assert!(edges.right);
         assert!(edges.bottom);
+    }
+
+    fn session_row(
+        pid: Option<u32>,
+        cwd: Option<&str>,
+        status: &str,
+        alive: Option<bool>,
+    ) -> SessionRow {
+        SessionRow {
+            pid,
+            name: "demo".to_string(),
+            title: "演示会话".to_string(),
+            session_id: None,
+            cwd: cwd.map(str::to_string),
+            status: status.to_string(),
+            status_updated_at: None,
+            alive,
+            entrypoint: None,
+        }
+    }
+
+    #[test]
+    fn classifies_like_frontend() {
+        // 进程退出优先于状态字段，与前端 classify() 一致
+        assert_eq!(
+            BoardKind::classify("done", Some(false)),
+            BoardKind::Interrupted
+        );
+        assert_eq!(
+            BoardKind::classify("waiting", Some(true)),
+            BoardKind::Blocked
+        );
+        assert_eq!(BoardKind::classify("BLOCKED", None), BoardKind::Blocked);
+        for status in ["failed", "crashed", "stopped"] {
+            assert_eq!(
+                BoardKind::classify(status, Some(true)),
+                BoardKind::Interrupted
+            );
+        }
+        for status in ["idle", "done"] {
+            assert_eq!(BoardKind::classify(status, Some(true)), BoardKind::Done);
+        }
+        for status in [
+            "busy", "shell", "working", "starting", "running", "resuming", "adopted", "unknown",
+        ] {
+            assert_eq!(BoardKind::classify(status, Some(true)), BoardKind::Working);
+        }
+    }
+
+    #[test]
+    fn session_key_prefers_pid_then_cwd() {
+        assert_eq!(
+            session_key(&session_row(Some(42), Some("C:\\demo"), "busy", Some(true))),
+            "pid:42"
+        );
+        assert_eq!(
+            session_key(&session_row(None, Some("C:\\demo"), "busy", Some(true))),
+            "cwd:C:\\demo"
+        );
+        assert_eq!(
+            session_key(&session_row(None, None, "busy", Some(true))),
+            "name:demo"
+        );
+    }
+
+    fn session_row_at(
+        pid: Option<u32>,
+        status: &str,
+        status_updated_at: Option<i64>,
+    ) -> SessionRow {
+        SessionRow {
+            status_updated_at,
+            ..session_row(pid, None, status, Some(true))
+        }
+    }
+
+    #[test]
+    fn alert_event_key_distinguishes_repeated_blocked_requests() {
+        let first_wait = session_row_at(Some(7), "waiting", Some(1000));
+        let same_wait = session_row_at(Some(7), "waiting", Some(1000));
+        let next_wait = session_row_at(Some(7), "waiting", Some(2000));
+
+        // 同一次等待期间 statusUpdatedAt 不变，轮询重复采集不能重复触发弹窗
+        assert_eq!(
+            alert_event_key(&first_wait, BoardKind::Blocked),
+            "pid:7:1000"
+        );
+        assert_eq!(
+            alert_event_key(&same_wait, BoardKind::Blocked),
+            "pid:7:1000"
+        );
+        // 再次进入待处理会刷新 statusUpdatedAt，应视为新的告警事件
+        assert_ne!(
+            alert_event_key(&next_wait, BoardKind::Blocked),
+            alert_event_key(&first_wait, BoardKind::Blocked)
+        );
+    }
+
+    #[test]
+    fn alert_event_key_falls_back_without_blocked_timestamp() {
+        let row = session_row_at(Some(3), "waiting", None);
+
+        assert_eq!(alert_event_key(&row, BoardKind::Blocked), "pid:3");
+    }
+
+    #[test]
+    fn interrupted_alert_key_ignores_status_timestamp() {
+        let row = session_row_at(Some(9), "failed", Some(1000));
+        let touched = session_row_at(Some(9), "failed", Some(2000));
+
+        // 进程已死：会话文件被重写不应再次唤醒弹窗
+        assert_eq!(alert_event_key(&row, BoardKind::Interrupted), "pid:9");
+        assert_eq!(alert_event_key(&touched, BoardKind::Interrupted), "pid:9");
+    }
+
+    #[test]
+    fn snapshot_counts_states_and_alert_keys() {
+        let rows = [
+            session_row(Some(1), Some("C:\\a"), "waiting", Some(true)),
+            session_row(Some(2), Some("C:\\b"), "failed", Some(true)),
+            session_row(Some(3), Some("C:\\c"), "busy", Some(true)),
+            session_row(Some(4), Some("C:\\d"), "done", Some(false)),
+            session_row(Some(5), Some("C:\\e"), "idle", Some(true)),
+        ];
+
+        let snapshot = build_snapshot(&rows);
+        assert_eq!(snapshot.blocked, 1);
+        assert_eq!(snapshot.interrupted, 2);
+        assert_eq!(snapshot.working, 1);
+        assert_eq!(snapshot.alert_items.len(), 3);
+        assert!(snapshot.alert_keys.contains("pid:1"));
+        // 进程已退出时即使状态是 done 也算已中断
+        assert!(snapshot.alert_keys.contains("pid:4"));
+        assert!(!snapshot.alert_keys.contains("pid:3"));
+    }
+
+    #[test]
+    fn tooltip_omits_zero_counts() {
+        assert_eq!(tray_tooltip(0, 0, 0), "Pinglet");
+        assert_eq!(tray_tooltip(1, 0, 2), "Pinglet · 1 待处理 · 2 进行中");
+        assert_eq!(tray_tooltip(0, 3, 0), "Pinglet · 3 已中断");
+        assert_eq!(
+            tray_tooltip(2, 3, 4),
+            "Pinglet · 2 待处理 · 3 已中断 · 4 进行中"
+        );
+    }
+
+    #[test]
+    fn notification_title_describes_alert_kinds() {
+        assert_eq!(notification_title(2, 0), "Pinglet · 2 个会话待处理");
+        assert_eq!(notification_title(0, 3), "Pinglet · 3 个会话已中断");
+        assert_eq!(notification_title(1, 2), "Pinglet · 3 个会话需要关注");
+    }
+
+    #[test]
+    fn notification_popup_limits_and_truncates_items() {
+        let long_title = "很".repeat(NOTIFICATION_TITLE_MAX_CHARS + 5);
+        let items: Vec<AlertItem> = (0..5)
+            .map(|index| AlertItem {
+                key: format!("pid:{index}"),
+                title: if index == 0 {
+                    long_title.clone()
+                } else {
+                    format!("会话{index}")
+                },
+                kind: if index % 2 == 0 {
+                    BoardKind::Blocked
+                } else {
+                    BoardKind::Interrupted
+                },
+            })
+            .collect();
+
+        let payload = notification_popup_payload(3, 2, &items);
+        assert_eq!(payload.title, "Pinglet · 5 个会话需要关注");
+        assert_eq!(payload.items.len(), NOTIFICATION_MAX_ITEMS);
+        assert!(payload.items[0].title.ends_with('…'));
+        assert_eq!(payload.items[0].kind, "blocked");
+        assert_eq!(payload.items[0].status, "等待确认");
+        assert_eq!(payload.items[1].kind, "interrupted");
+        assert_eq!(payload.items[1].status, "已中断");
+        assert_eq!(payload.more.as_deref(), Some("等 5 个会话"));
+        // 只列举前 3 条
+        assert!(payload.items.iter().all(|item| item.title != "会话4"));
+    }
+
+    #[test]
+    fn notification_position_sticks_to_work_area_corner() {
+        assert_eq!(
+            resolve_notification_position(0, 0, 1920, 1040, 380, 176, 16),
+            (1524, 848)
+        );
+        // 工作区比窗口还小时退回左上角
+        assert_eq!(
+            resolve_notification_position(100, 50, 300, 100, 380, 176, 16),
+            (100, 50)
+        );
+    }
+
+    #[test]
+    fn median_luminance_handles_odd_and_even_samples() {
+        assert_eq!(median_luminance(&mut []), None);
+        assert_eq!(median_luminance(&mut [0.9, 0.1, 0.5]), Some(0.5));
+        assert_eq!(median_luminance(&mut [0.4, 0.2]), Some(0.3));
+    }
+
+    #[test]
+    fn tray_icon_keeps_full_size_and_draws_ring_and_badge() {
+        let base = Image::new_owned(vec![255_u8; 20 * 20 * 4], 20, 20);
+
+        let plain = build_tray_icon(&base, None);
+        // 不再缩放：四角、中心与角标位置都保留原图像素
+        assert_eq!(&plain.rgba()[0..4], &[255, 255, 255, 255]);
+        let center = ((10 * 20 + 10) * 4) as usize;
+        assert_eq!(&plain.rgba()[center..center + 4], &[255, 255, 255, 255]);
+        let badge = ((14 * 20 + 14) * 4) as usize;
+        assert_eq!(&plain.rgba()[badge..badge + 4], &[255, 255, 255, 255]);
+
+        let alert = build_tray_icon(&base, Some(ALERT_COLOR));
+        // 画布边缘的圆环覆盖原图像素，圆环之外的四角保持不变
+        let top_center = ((0 * 20 + 10) * 4) as usize;
+        assert_eq!(&alert.rgba()[top_center..top_center + 4], &ALERT_COLOR);
+        assert_eq!(&alert.rgba()[0..4], &[255, 255, 255, 255]);
+        // 右下角实心角标同样使用状态色，16px 托盘下仍清晰可见
+        assert_eq!(&alert.rgba()[badge..badge + 4], &ALERT_COLOR);
     }
 }

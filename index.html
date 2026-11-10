@@ -14,23 +14,25 @@
         <div class="brand">
           <!-- 信号点 + 两道波纹：分别静态映射进行中 / 已中断 / 待处理，几何与 assets/app-icon.svg 一致 -->
           <svg class="logo" viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true">
-            <path
-              id="logo-pending"
-              class="logo-part"
-              d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1"
-              fill="none"
-              stroke-width="70.4"
-              stroke-linecap="round"
-            />
-            <path
-              id="logo-interrupted"
-              class="logo-part"
-              d="M311 443.1A230.4 230.4 0 0 1 577.9 630"
-              fill="none"
-              stroke-width="83.2"
-              stroke-linecap="round"
-            />
-            <circle id="logo-running" class="logo-part" cx="351" cy="670" r="96" />
+            <g transform="translate(512 502) scale(1.3) translate(-512 -502)">
+              <path
+                id="logo-pending"
+                class="logo-part"
+                d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1"
+                fill="none"
+                stroke-width="95"
+                stroke-linecap="round"
+              />
+              <path
+                id="logo-interrupted"
+                class="logo-part"
+                d="M311 443.1A230.4 230.4 0 0 1 577.9 630"
+                fill="none"
+                stroke-width="110"
+                stroke-linecap="round"
+              />
+              <circle id="logo-running" class="logo-part" cx="351" cy="670" r="110" />
+            </g>
           </svg>
           <span class="wordmark" aria-hidden="true">pinglet</span>
           <span id="summary" class="summary" aria-live="polite"></span>
@@ -156,7 +158,7 @@
         <span
           id="heartbeat"
           class="heartbeat"
-          role="status"
+          role="img"
           aria-label="数据连接状态"
           data-level="offline"
         ></span>
