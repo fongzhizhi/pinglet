@@ -22,7 +22,7 @@
     "dev:web": "vite",
     "dev:desktop": "tauri dev",
     "build": "tsc && vite build",
-    "build:nsis": "tauri build -- --bundles nsis",
+    "build:nsis": "tauri build --bundles nsis",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
