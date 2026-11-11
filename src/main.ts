@@ -6,14 +6,19 @@ import { scheduleAutoThemeSample, startAutoTheme, stopAutoTheme } from "./auto-t
 import {
   BOARD_STATES,
   STATE_META,
+  applyHiddenSessions,
   buildTooltip,
+  canHideSession,
   classify,
+  createHiddenSessionSnapshot,
   describeDuration,
   directoryName,
   entrypointLabel,
+  getRowKey,
   sessionAction,
   sortRows,
   type BoardState,
+  type HiddenSessionSnapshot,
   type ListResult,
   type SessionRow,
 } from "./session-state";
@@ -22,6 +27,7 @@ import {
   resetSettings,
   setClickThroughSetting,
   setPinnedSetting,
+  setThemeTransitionEnabled,
   subscribeSettings,
   type ReminderKey,
 } from "./settings";
@@ -30,12 +36,15 @@ import {
   IS_TAURI,
   activateSession,
   closeWindow,
+  hideMainWindowNow,
   keepWindowInsideWorkArea,
   listSessions,
   onOpenSettings,
   onTrayClickThroughChange,
+  onWindowHideRequest,
   onWindowMoved,
   onWindowResized,
+  onWindowShowRequest,
   onWindowVisibility,
   resetWindowPosition,
   resizeWindow,
@@ -48,6 +57,13 @@ import {
   toMessage,
   type ResizeDirection,
 } from "./system";
+import {
+  beginPanelHide,
+  completePanelHide,
+  createPanelAnimationState,
+  markPanelHidden,
+  markPanelShown,
+} from "./window-animation";
 
 const REFRESH_INTERVAL_MS = 2000;
 const HEARTBEAT_INTERVAL_MS = 1000;
@@ -89,6 +105,14 @@ const SOUND_END_FREQUENCY = 660;
 const SOUND_DURATION_SECONDS = 0.18;
 const SOUND_GAIN = 0.2;
 const SOUND_RAMP_SECONDS = 0.01;
+// 首屏稳定后再开启主题过渡，避开自动主题的首次采样修正
+const THEME_TRANSITION_ENABLE_DELAY_MS = 1000;
+// 与 styles.css 的 --panel-hide/show-duration 保持一致；动画期间暂停高度测量
+const PANEL_HIDE_ANIMATION_MS = 160;
+const PANEL_SHOW_ANIMATION_MS = 220;
+// 过渡结束后留一点余量再测量，避免 transform 中间值污染 getBoundingClientRect
+const PANEL_ANIMATION_SETTLE_MS = 40;
+const PREFERS_REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 const STATE_CLASSES = BOARD_STATES.map((state) => STATE_META[state].className);
 
@@ -152,14 +176,12 @@ if (!IS_TAURI) {
 }
 
 const panelElement = requireElement<HTMLElement>("#panel");
+const panelStageElement = requireElement<HTMLDivElement>("#panel-stage");
 const boardHeaderElement = requireElement<HTMLElement>("#board-header");
 const listElement = requireElement<HTMLDivElement>("#session-list");
 const errorBarElement = requireElement<HTMLDivElement>("#error-bar");
 const summaryElement = requireElement<HTMLSpanElement>("#summary");
 const logoElement = requireElement<SVGElement>(".logo");
-const logoPendingElement = requireElement<SVGPathElement>("#logo-pending");
-const logoInterruptedElement = requireElement<SVGPathElement>("#logo-interrupted");
-const logoRunningElement = requireElement<SVGCircleElement>("#logo-running");
 const heartbeatElement = requireElement<HTMLSpanElement>("#heartbeat");
 const heartbeatTextElement = requireElement<HTMLSpanElement>("#heartbeat-text");
 const footerGapElement = requireElement<HTMLElement>(".footer-gap");
@@ -201,6 +223,14 @@ let initialWindowSizeReady: Promise<void> = Promise.resolve();
 let isSettingsOpen = false;
 // NOTE: 设置面板内开启穿透时先挂起，等面板关闭后再应用，否则面板会立刻失去点击能力
 let isClickThroughPending = false;
+// 已完成会话的临时隐藏集合只驻留内存，不写入 localStorage；状态变化后自动清理恢复
+const hiddenSessions = new Map<string, HiddenSessionSnapshot>();
+let latestRows: SessionRow[] = [];
+let rowMenuElement: HTMLDivElement | null = null;
+let rowMenuButton: HTMLButtonElement | null = null;
+let rowMenuTargetKey: string | null = null;
+// 设置面板挂载后回填，用于同步「恢复临时隐藏」按钮的计数与禁用态
+let hiddenCountListener: ((count: number) => void) | null = null;
 let previousStates = new Map<string, BoardState>();
 let hasRenderedSessions = false;
 let emptyElement: HTMLDivElement | null = null;
@@ -217,6 +247,11 @@ let breathingTimer: number | undefined;
 let breathingKind: BreathingKind | null = null;
 let shakeTimer: number | undefined;
 let audioContext: AudioContext | null = null;
+// 窗口显隐动画状态：收起 / 展开期间暂停内容高度测量，避免 transform 影响测量结果
+const panelAnimation = createPanelAnimationState();
+let panelHideTimer: number | undefined;
+let panelShowTimer: number | undefined;
+let isPanelAnimating = false;
 
 function requireElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -224,16 +259,6 @@ function requireElement<T extends Element>(selector: string): T {
     throw new Error(`缺少 DOM 节点: ${selector}`);
   }
   return element;
-}
-
-function getRowKey(row: SessionRow): string {
-  if (row.pid !== null) {
-    return `pid:${row.pid}`;
-  }
-  if (row.cwd !== null) {
-    return `cwd:${row.cwd}`;
-  }
-  return `name:${row.name}`;
 }
 
 /** 目录标签配色键：同一路径稳定同色，未知目录统一兜底色。 */
@@ -364,15 +389,34 @@ function createRowView(): RowView {
     }
   });
   element.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
-    }
     const row = rowsByKey.get(element.dataset.key ?? "");
     if (row === undefined) {
       return;
     }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      if (!canHideSession(classify(row))) {
+        return;
+      }
+      event.preventDefault();
+      const rect = element.getBoundingClientRect();
+      showRowMenu(rect.left + TOOLTIP_OFFSET, rect.top + TOOLTIP_OFFSET, getRowKey(row));
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
     event.preventDefault();
     void activateRow(row, element);
+  });
+  element.addEventListener("contextmenu", (event) => {
+    const row = rowsByKey.get(element.dataset.key ?? "");
+    if (row === undefined || !canHideSession(classify(row))) {
+      return;
+    }
+    event.preventDefault();
+    hideTooltip();
+    hideLogoTooltip();
+    showRowMenu(event.clientX, event.clientY, getRowKey(row));
   });
 
   return {
@@ -436,8 +480,11 @@ function updateRowView(
 }
 
 function renderRows(rows: SessionRow[]): void {
+  latestRows = rows;
+  // 先按快照清理失效的隐藏项，再过滤；隐藏行不参与排序、汇总、测高与状态提醒
+  const visibleRows = applyHiddenSessions(rows, hiddenSessions);
   const now = Date.now();
-  const sortedRows = sortRows(rows);
+  const sortedRows = sortRows(visibleRows);
   const desiredKeys = new Set(sortedRows.map((row) => getRowKey(row)));
   const folderColors = assignFolderColorSlots(sortedRows.map((row) => folderColorKey(row.cwd)));
 
@@ -450,6 +497,9 @@ function renderRows(rows: SessionRow[]): void {
   }
   if (hoveredRowKey !== null && !desiredKeys.has(hoveredRowKey)) {
     hideTooltip();
+  }
+  if (rowMenuTargetKey !== null && !desiredKeys.has(rowMenuTargetKey)) {
+    hideRowMenu();
   }
 
   rowsByKey.clear();
@@ -476,8 +526,9 @@ function renderRows(rows: SessionRow[]): void {
     if (emptyElement === null) {
       emptyElement = document.createElement("div");
       emptyElement.className = "empty";
-      emptyElement.textContent = "暂无活跃会话";
     }
+    emptyElement.textContent =
+      hiddenSessions.size > 0 ? `已临时隐藏 ${hiddenSessions.size} 个已完成会话` : "暂无活跃会话";
     if (!emptyElement.isConnected) {
       listElement.append(emptyElement);
     }
@@ -498,7 +549,7 @@ function renderRows(rows: SessionRow[]): void {
   const interruptedCount = sortedRows.filter((row) => classify(row) === "interrupted").length;
   const workingCount = sortedRows.filter((row) => classify(row) === "working").length;
   renderSummary(blockedCount, interruptedCount, workingCount);
-  renderLogoState(blockedCount, interruptedCount, workingCount);
+  hiddenCountListener?.(hiddenSessions.size);
 
   const reminderEvent = detectStateChange(sortedRows);
   if (reminderEvent !== null) {
@@ -510,15 +561,86 @@ function renderRows(rows: SessionRow[]): void {
   }
 }
 
-/** Logo 只做静态状态映射：三层图形分别对应待处理、已中断、进行中，不做闪烁动画。 */
-function renderLogoState(
-  blockedCount: number,
-  interruptedCount: number,
-  workingCount: number,
-): void {
-  logoPendingElement.classList.toggle("active", blockedCount > 0);
-  logoInterruptedElement.classList.toggle("active", interruptedCount > 0);
-  logoRunningElement.classList.toggle("active", workingCount > 0);
+function renderCurrentRows(): void {
+  renderRows(latestRows);
+  window.requestAnimationFrame(() => {
+    void resizeWindowToContent();
+  });
+}
+
+function ensureRowMenu(): { menu: HTMLDivElement; button: HTMLButtonElement } {
+  if (rowMenuElement !== null && rowMenuButton !== null) {
+    return { menu: rowMenuElement, button: rowMenuButton };
+  }
+
+  const menu = document.createElement("div");
+  menu.className = "row-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "row-menu-item";
+  button.setAttribute("role", "menuitem");
+  button.textContent = "临时隐藏";
+  button.addEventListener("click", () => {
+    const key = rowMenuTargetKey;
+    hideRowMenu();
+    if (key !== null) {
+      hideSession(key);
+    }
+  });
+
+  menu.append(button);
+  document.body.append(menu);
+  rowMenuElement = menu;
+  rowMenuButton = button;
+  return { menu, button };
+}
+
+function showRowMenu(x: number, y: number, key: string): void {
+  const { menu, button } = ensureRowMenu();
+  hideTooltip();
+  hideLogoTooltip();
+  rowMenuTargetKey = key;
+  menu.hidden = false;
+  // 先显示再测量，才能按实际尺寸在窗口边缘翻转菜单
+  const rect = menu.getBoundingClientRect();
+  const left = x + rect.width > window.innerWidth - TOOLTIP_EDGE_MARGIN ? x - rect.width : x;
+  const top = y + rect.height > window.innerHeight - TOOLTIP_EDGE_MARGIN ? y - rect.height : y;
+  menu.style.left = `${Math.max(TOOLTIP_EDGE_MARGIN, left)}px`;
+  menu.style.top = `${Math.max(TOOLTIP_EDGE_MARGIN, top)}px`;
+  button.focus();
+}
+
+function hideRowMenu(): void {
+  rowMenuTargetKey = null;
+  if (rowMenuElement !== null) {
+    rowMenuElement.hidden = true;
+  }
+}
+
+function hideSession(key: string): void {
+  const row = rowsByKey.get(key);
+  if (row === undefined || !canHideSession(classify(row))) {
+    return;
+  }
+  hiddenSessions.set(key, createHiddenSessionSnapshot(row));
+  hideTooltip();
+  hideLogoTooltip();
+  renderCurrentRows();
+}
+
+/** 清空全部临时隐藏项并返回恢复条数，供设置面板展示结果。 */
+function restoreHiddenSessions(): number {
+  const count = hiddenSessions.size;
+  if (count === 0) {
+    return 0;
+  }
+  hiddenSessions.clear();
+  hideRowMenu();
+  renderCurrentRows();
+  return count;
 }
 
 function renderSummary(blockedCount: number, interruptedCount: number, workingCount: number): void {
@@ -1180,11 +1302,141 @@ function measureSettingsHeight(): number {
   );
 }
 
+function prefersReducedMotion(): boolean {
+  return window.matchMedia(PREFERS_REDUCED_MOTION_QUERY).matches;
+}
+
+/** 直接落到收起态且不做过渡；用于窗口已被系统隐藏 / 最小化的场景。 */
+function collapsePanelImmediately(): void {
+  panelStageElement.classList.add("is-panel-snap");
+  panelStageElement.classList.remove("is-panel-collapsing");
+  panelStageElement.classList.add("is-panel-collapsed");
+  // 强制落定收起样式，避免下次展开时从旧的展开状态插值
+  void panelStageElement.offsetWidth;
+}
+
+/** 收起动画：结束后回调；reduce-motion 下立即完成。 */
+function startPanelHideAnimation(onFinished: () => void): void {
+  if (panelShowTimer !== undefined) {
+    window.clearTimeout(panelShowTimer);
+    panelShowTimer = undefined;
+  }
+  if (panelHideTimer !== undefined) {
+    window.clearTimeout(panelHideTimer);
+    panelHideTimer = undefined;
+  }
+  isPanelAnimating = true;
+  hideTooltip();
+  hideLogoTooltip();
+  hideRowMenu();
+
+  if (prefersReducedMotion()) {
+    collapsePanelImmediately();
+    isPanelAnimating = false;
+    onFinished();
+    return;
+  }
+
+  panelStageElement.classList.remove("is-panel-snap");
+  panelStageElement.classList.add("is-panel-collapsing");
+  void panelStageElement.offsetWidth;
+  panelStageElement.classList.add("is-panel-collapsed");
+  panelHideTimer = window.setTimeout(() => {
+    panelHideTimer = undefined;
+    isPanelAnimating = false;
+    onFinished();
+  }, PANEL_HIDE_ANIMATION_MS);
+}
+
+function finishPanelShow(): void {
+  panelShowTimer = undefined;
+  isPanelAnimating = false;
+  window.requestAnimationFrame(() => {
+    void resizeWindowToContent(true);
+  });
+}
+
+/** 从收起态展开；首次启动或已展开时不做动画。 */
+function expandPanel(): void {
+  if (panelHideTimer !== undefined) {
+    window.clearTimeout(panelHideTimer);
+    panelHideTimer = undefined;
+  }
+  const shouldAnimate = markPanelShown(panelAnimation);
+  if (!shouldAnimate) {
+    return;
+  }
+
+  if (prefersReducedMotion()) {
+    panelStageElement.classList.remove(
+      "is-panel-snap",
+      "is-panel-collapsing",
+      "is-panel-collapsed",
+    );
+    isPanelAnimating = false;
+    window.requestAnimationFrame(() => {
+      void resizeWindowToContent(true);
+    });
+    return;
+  }
+
+  isPanelAnimating = true;
+  panelStageElement.classList.remove("is-panel-snap", "is-panel-collapsing");
+  // 先让收起态在没有过渡的情况下成为起点，再移除类触发展开过渡
+  void panelStageElement.offsetWidth;
+  panelStageElement.classList.remove("is-panel-collapsed");
+  if (panelShowTimer !== undefined) {
+    window.clearTimeout(panelShowTimer);
+  }
+  panelShowTimer = window.setTimeout(
+    finishPanelShow,
+    PANEL_SHOW_ANIMATION_MS + PANEL_ANIMATION_SETTLE_MS,
+  );
+}
+
+/** Rust 隐藏入口：先播放收起动画，结束后再真正隐藏；代号过期则放弃。 */
+function handleWindowHideRequest(generation: number): void {
+  beginPanelHide(panelAnimation, generation);
+  startPanelHideAnimation(() => {
+    if (!completePanelHide(panelAnimation, generation)) {
+      return;
+    }
+    void hideMainWindowNow(generation).catch((error: unknown) => {
+      console.warn("pinglet: 隐藏窗口失败", error);
+      expandPanel();
+    });
+  });
+}
+
+/** 窗口已被系统隐藏 / 最小化：保持收起态，下次显示时播放展开。 */
+function handleWindowHidden(): void {
+  if (panelHideTimer !== undefined) {
+    window.clearTimeout(panelHideTimer);
+    panelHideTimer = undefined;
+  }
+  if (panelShowTimer !== undefined) {
+    window.clearTimeout(panelShowTimer);
+    panelShowTimer = undefined;
+  }
+  isPanelAnimating = false;
+  markPanelHidden(panelAnimation);
+  if (!panelStageElement.classList.contains("is-panel-collapsed")) {
+    collapsePanelImmediately();
+  }
+}
+
 async function resizeWindowToContent(force = false): Promise<void> {
   if (!IS_TAURI) {
     return;
   }
+  // 显隐动画期间 transform 会污染 getBoundingClientRect，结束后再统一测量
+  if (isPanelAnimating || panelAnimation.collapsed) {
+    return;
+  }
   await initialWindowSizeReady;
+  if (isPanelAnimating || panelAnimation.collapsed) {
+    return;
+  }
   if (!force && Date.now() - lastUserResizeAt < WINDOW_RESIZE_SETTLE_MS) {
     return;
   }
@@ -1381,6 +1633,7 @@ function setSettingsOpen(open: boolean): void {
   settingsButton.classList.toggle("is-active", open);
   hideTooltip();
   hideLogoTooltip();
+  hideRowMenu();
 
   if (open) {
     void settingsPanelHandle.syncSystemState();
@@ -1436,22 +1689,43 @@ closeButton.addEventListener("click", () => {
   }
   // 关闭 / 最小化前让挂起的穿透生效，避免设置与窗口实际状态不一致
   applyPendingClickThrough();
-  void closeWindow().catch((error: unknown) => {
-    showNotice(`关闭窗口失败: ${toMessage(error)}`);
+  markPanelHidden(panelAnimation);
+  startPanelHideAnimation(() => {
+    void closeWindow().catch((error: unknown) => {
+      showNotice(`关闭窗口失败: ${toMessage(error)}`);
+      expandPanel();
+    });
   });
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && isSettingsOpen) {
+  if (event.key !== "Escape") {
+    return;
+  }
+  if (rowMenuElement !== null && !rowMenuElement.hidden) {
+    hideRowMenu();
+    return;
+  }
+  if (isSettingsOpen) {
     setSettingsOpen(false);
   }
 });
 
 document.addEventListener("pointerdown", unlockAudio, { once: true });
+document.addEventListener("pointerdown", (event) => {
+  if (rowMenuElement === null || rowMenuElement.hidden) {
+    return;
+  }
+  if (event.target instanceof Node && rowMenuElement.contains(event.target)) {
+    return;
+  }
+  hideRowMenu();
+});
 listElement.addEventListener(
   "scroll",
   () => {
     hideTooltip();
+    hideRowMenu();
     revealScrollbar();
   },
   { passive: true },
@@ -1465,10 +1739,12 @@ const settingsPanelHandle = mountSettingsPanel(settingsPanelElement, {
   onPreviewReminder: previewReminder,
   onResetSettings: resetAllSettings,
   onClickThroughChange: handleClickThroughChange,
+  onRestoreHidden: restoreHiddenSessions,
   onClose: () => {
     setSettingsOpen(false);
   },
 });
+hiddenCountListener = settingsPanelHandle.setHiddenSessionCount;
 
 const initialSettings = getSettings();
 let lastThemeMode = initialSettings.theme;
@@ -1476,6 +1752,9 @@ applyPinned(initialSettings.pinned);
 applyCloseAction(initialSettings.closeToTray);
 syncNotificationPreferences(initialSettings.systemNotifications, initialSettings.doNotDisturb);
 startAutoTheme();
+window.setTimeout(() => {
+  setThemeTransitionEnabled(true);
+}, THEME_TRANSITION_ENABLE_DELAY_MS);
 subscribeSettings(() => {
   const settings = getSettings();
   applyCloseAction(settings.closeToTray);
@@ -1500,14 +1779,24 @@ if (IS_TAURI) {
     isWindowActive = active;
     syncWindowPauseClass();
     if (active) {
+      expandPanel();
       void refresh();
       startAutoTheme();
     } else {
       // 隐藏/最小化时没有可见主题可调，停掉周期采样，重新显示时再立即判定
+      handleWindowHidden();
       stopAutoTheme();
     }
   }).catch((error: unknown) => {
     console.warn("pinglet: 监听窗口显隐失败", error);
+  });
+  void onWindowHideRequest(handleWindowHideRequest).catch((error: unknown) => {
+    console.warn("pinglet: 监听隐藏动画请求失败", error);
+  });
+  void onWindowShowRequest(() => {
+    expandPanel();
+  }).catch((error: unknown) => {
+    console.warn("pinglet: 监听显示动画请求失败", error);
   });
   void onWindowMoved(() => {
     scheduleAutoThemeSample();

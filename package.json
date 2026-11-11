@@ -1,7 +1,7 @@
 {
   "name": "pinglet",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Claude Code 会话状态看板",
   "author": "fongzhizhi",
   "license": "MIT",
@@ -19,7 +19,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:web": "vite",
+    "dev:desktop": "tauri dev",
     "build": "tsc && vite build",
+    "build:nsis": "tauri build -- --bundles nsis",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",

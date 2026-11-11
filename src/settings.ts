@@ -39,12 +39,21 @@ export {
 
 /** 自动主题的生效结果单独持久化：通知弹窗是独立 WebView，不运行采样，需要复用主窗口的判定。 */
 const EFFECTIVE_THEME_STORAGE_KEY = "pinglet.effective-theme.v1";
+/** 主题切换时短暂挂到根节点，CSS 只在存在该类时开启颜色过渡。 */
+const THEME_TRANSITION_CLASS = "is-theme-transitioning";
+/** NOTE: 需与 styles.css 的 --theme-transition-duration（600ms）保持同步，额外留 40ms 收尾。 */
+const THEME_TRANSITION_SETTLE_MS = 640;
 
 const listeners = new Set<() => void>();
 let settings = loadSettings();
 // 自动主题需要异步采样背景；先沿用上次生效的深浅色，采样成功后再由 auto-theme 控制器覆盖
 let effectiveTheme: EffectiveTheme =
   settings.theme === "auto" ? (readStoredEffectiveTheme() ?? "dark") : settings.theme;
+// 记录已应用到 DOM 的主题：只有真正变化才播放过渡，避免每次设置变更都触发
+let appliedTheme: EffectiveTheme | null = null;
+// 默认关闭，主窗口初始化完成后延迟开启；通知弹窗等独立页面不开启
+let isThemeTransitionEnabled = false;
+let themeTransitionTimer: number | undefined;
 
 export function getSettings(): Settings {
   return {
@@ -226,10 +235,54 @@ export function resetSettings(): Settings {
   return getSettings();
 }
 
+/**
+ * 主题过渡开关：主窗口在首屏稳定后开启，避免启动时自动主题的首次修正被动画化。
+ */
+export function setThemeTransitionEnabled(enabled: boolean): void {
+  isThemeTransitionEnabled = enabled;
+  if (!enabled) {
+    clearThemeTransition();
+  }
+}
+
 export function applyTheme(theme: EffectiveTheme): void {
+  const shouldTransition =
+    appliedTheme !== null &&
+    appliedTheme !== theme &&
+    isThemeTransitionEnabled &&
+    document.visibilityState === "visible" &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if (shouldTransition) {
+    beginThemeTransition();
+  }
+
+  appliedTheme = theme;
   document.documentElement.dataset.theme = theme;
   document.documentElement.style.colorScheme = theme;
   writeStorage(EFFECTIVE_THEME_STORAGE_KEY, theme);
+}
+
+function beginThemeTransition(): void {
+  const root = document.documentElement;
+  root.classList.add(THEME_TRANSITION_CLASS);
+  // NOTE: 强制一次样式计算，让过渡规则先以旧主题颜色为起点，再写入新 data-theme
+  void root.offsetHeight;
+  if (themeTransitionTimer !== undefined) {
+    window.clearTimeout(themeTransitionTimer);
+  }
+  themeTransitionTimer = window.setTimeout(() => {
+    themeTransitionTimer = undefined;
+    root.classList.remove(THEME_TRANSITION_CLASS);
+  }, THEME_TRANSITION_SETTLE_MS);
+}
+
+function clearThemeTransition(): void {
+  if (themeTransitionTimer !== undefined) {
+    window.clearTimeout(themeTransitionTimer);
+    themeTransitionTimer = undefined;
+  }
+  document.documentElement.classList.remove(THEME_TRANSITION_CLASS);
 }
 
 export function applyFontSize(fontSize: FontSize): void {
@@ -291,6 +344,13 @@ function notify(): void {
     }
   }
 }
+
+// 窗口隐藏时清理过渡类与计时器，避免恢复可见后残留的半程过渡
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    clearThemeTransition();
+  }
+});
 
 applyTheme(effectiveTheme);
 applyFontSize(settings.fontSize);

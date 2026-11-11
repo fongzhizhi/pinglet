@@ -11,7 +11,7 @@
 
 ```bash
 npm install
-npm run tauri dev      # 前端热更新 + 桌面窗口
+npm run dev:desktop    # 前端热更新 + 桌面窗口（等同 npm run tauri dev）
 ```
 
 提交前可运行与 CI 相同的检查：
@@ -30,8 +30,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 调试布局、配色、字号时不必每次都看 Tauri 窗口：
 
 ```bash
-npm run dev
-# 浏览器打开 http://localhost:1420
+npm run dev:web
+# 浏览器打开 http://localhost:1420（等同 npm run dev）
 ```
 
 - 非 Tauri 环境自动加载 `src/mock-sessions.ts` 的模拟数据，覆盖四态、未知状态兜底与死进程残留。
@@ -47,7 +47,7 @@ npm run dev
 
    ```bash
    npm install                          # 仅首次或依赖有变化时
-   npm run tauri build -- --bundles nsis
+   npm run build:nsis                   # 等同 npm run tauri build -- --bundles nsis
    ```
 
 3. 产物：
@@ -58,9 +58,9 @@ NSIS 工具集缓存在 `%LOCALAPPDATA%\tauri\NSIS`，缓存存在时打包不�
 
 ## 图标
 
-- 应用 / 托盘 / 安装包图标以 `assets/app-icon.svg` 为唯一源文件（1024×1024，与顶栏 logo 同图形同配色，深色圆底铺满画布，图形放大约 1.3 倍并加粗）。
+- 应用 / 托盘 / 安装包图标以 `assets/app-icon.svg` 为唯一源文件（1024×1024，透明背景，与顶栏 logo 同图形同配色，图形放大约 1.7 倍并加粗）。
 - 修改后运行 `npx tauri icon assets/app-icon.svg` 重新生成 `src-tauri/icons/`。
-- 仓库只保留 `bundle.icon` 引用的 5 个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico`、`icon.icns`），其余尺寸、Store 图标与 `android/`、`ios/` 目录在生成后删除。托盘三态图标由 Rust 在运行时基于 exe 内嵌的默认窗口图标合成（完整尺寸 + 状态色圆环），无需单独素材或配置；生成物不要手工编辑。
+- 仓库只保留 `bundle.icon` 引用的 5 个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico`、`icon.icns`），其余尺寸、Store 图标与 `android/`、`ios/` 目录在生成后删除。托盘三态图标由 Rust 在运行时基于 exe 内嵌的默认窗口图标合成：先叠加深绿空心圆角描边生成托盘专用底图（`build_tray_badge_icon`），再生成帧（空闲单帧、进行中透明度呼吸 + 轻微缩放帧、告警隐藏 / 显示闪烁帧），无需单独素材或配置；生成物不要手工编辑。
 - `build.rs` 已声明 `cargo:rerun-if-changed=icons`，图标重新生成后会触发 Windows 资源重编。若 debug 版托盘仍显示旧图标，重启 `tauri dev`，必要时执行 `cargo clean -p pinglet` 后再构建。
 - 顶栏 logo 是 `index.html` 内的内联 SVG，几何与配色需与 `assets/app-icon.svg` 保持一致。
 
@@ -83,7 +83,7 @@ Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板�
 
 1. 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号。
 2. 提交并推送 `master`，确认 CI 通过。
-3. 打标签并推送：`git tag v1.4.0`、`git push origin v1.4.0`。
+3. 打标签并推送：`git tag v1.4.1`、`git push origin v1.4.1`。
 4. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的安装包与便携版后发布。
 
 > 如果目标版本的标签已存在，先递增版本号（例如 `1.4.1`）并同步三处版本，再打新标签；不要重复推送同一个标签。

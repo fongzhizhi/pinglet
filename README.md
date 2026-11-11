@@ -19,8 +19,9 @@ Pinglet 把本机所有活跃的 Claude Code 交互式会话聚合成一个小�
 - **四态看板**：待处理置顶，已中断独立标色；等得越久越靠前，异常会话一眼可见。
 - **状态提醒**：待处理 / 已中断突变时触发呼吸灯、音效与窗口抖动；进行中 → 已完成有轻量完成提示；窗口隐藏时会在屏幕右下角弹出应用内通知卡片。
 - **行持续动效**：待处理 / 已中断行有背景呼吸与状态灯光环，进行中行底部有循环流光；两个动效可分别关闭，已完成行不打扰。
-- **托盘状态**：警示 / 进行中 / 空闲三态图标，隐藏期间出现新告警会闪烁，tooltip 汇总各状态数量。
-- **一键回到会话**：双击会话行（或按 Enter）激活对应的 VSCode 窗口或 Git Bash 终端。
+- **托盘状态**：警示 / 进行中 / 空闲三态由图标自身呼吸 / 闪烁表达；托盘使用深绿描边的专用图标，隐藏期间出现新告警会闪烁，tooltip 汇总各状态数量。
+- **一键回到会话**：双击会话行（或按 Enter）激活对应的 VSCode 窗口或 Git Bash 终端；只激活已打开窗口，不会新开 VSCode。
+- **临时隐藏**：右键已完成会话可将其从面板临时移除，状态变化或重启后自动恢复。
 - **常驻但不打扰**：窗口置顶、无边框、高度随内容自适应，拖到屏幕边缘会自动吸附；记住窗口位置，重复启动只保留一个实例。
 - **按需定制**：暗 / 亮 / 自动主题、三档字号、面板透明度、提醒方式、面板行持续动效、应用内免打扰、通知弹窗、开机自启与全局快捷键（默认 `Alt+Shift+P`）。
 - **只读与隐私**：只解析白名单字段；transcript 只读标题记录，不读取消息正文。
@@ -40,7 +41,7 @@ Pinglet 把本机所有活跃的 Claude Code 交互式会话聚合成一个小�
 - 悬停会话行约 1.5 秒，查看完整路径、状态、入口、进程与会话 ID。
 - 双击或按 Enter 激活会话：VSCode 会话会切到对应窗口；CLI 会话会聚焦其所在的 VSCode 集成终端或 Git Bash 窗口。
 - 顶栏图钉切换「拖动 / 固定」模式，齿轮打开设置；关闭按钮按设置直接退出或最小化到托盘。
-- 托盘图标显示看板状态：红环为警示、绿环为进行中、普通图标为空闲；隐藏期间出现新告警会闪烁，打开窗口后转为常亮。右键提供「显示 / 鼠标穿透 / 设置 / 退出」。开启鼠标穿透后，用全局快捷键或托盘左键恢复。
+- 托盘图标使用深绿描边的专用版本显示看板状态：进行中整体呼吸，隐藏期间出现新告警且未读时隐藏 / 显示闪烁，空闲为静态图标。右键提供「显示 / 鼠标穿透 / 设置 / 退出」。开启鼠标穿透后，用全局快捷键或托盘左键恢复。
 - 更完整的交互、窗口行为与已知限制见 [使用说明](docs/usage.md)。
 
 ## 设置
@@ -75,13 +76,13 @@ Pinglet 把本机所有活跃的 Claude Code 交互式会话聚合成一个小�
 
 ```bash
 npm install
-npm run tauri dev    # 桌面开发（前端热更新 + Tauri 窗口）
-npm run dev          # 浏览器预览 UI（http://localhost:1420）
+npm run dev:desktop  # 桌面开发（前端热更新 + Tauri 窗口）
+npm run dev:web      # 浏览器预览 UI（http://localhost:1420）
 npm test             # Vitest 单元测试
 npm run lint         # ESLint
 npm run format       # Prettier 格式化
 npm run build        # 类型检查 + 前端构建
-npm run tauri build -- --bundles nsis   # 打包 NSIS 安装包
+npm run build:nsis   # 打包 NSIS 安装包
 cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单元测试
 ```
 
@@ -98,7 +99,7 @@ docs/                使用说明、构建说明与设计文档
 
 - [使用说明](docs/usage.md)：界面、交互、设置与窗口行为
 - [构建与打包](docs/build.md)：环境准备、NSIS 打包、图标生成
-- [设计定稿 v1.4](docs/plans/pinglet-v1.4.md) / [v1.3](docs/plans/pinglet-v1.3.md) / [v1.2](docs/plans/pinglet-v1.2.md)
+- [设计定稿 v1.4.1](docs/plans/pinglet-v1.4.1.md) / [v1.4](docs/plans/pinglet-v1.4.md) / [v1.3](docs/plans/pinglet-v1.3.md) / [v1.2](docs/plans/pinglet-v1.2.md)
 - [会话标题数据源说明](docs/session-title-source.md)
 - [开发约定](CLAUDE.md)
 
@@ -108,7 +109,7 @@ docs/                使用说明、构建说明与设计文档
 - 不读取消息正文，因此悬浮提示不展示 Prompt 内容；无标题的新会话回退显示目录名。
 - CLI 会话仅支持激活 VSCode 集成终端或 Git Bash 窗口；Windows Terminal 等终端未支持。
 - 鼠标穿透开启后窗口不接收点击，需通过全局快捷键或托盘菜单恢复。
-- 通知弹窗由 Pinglet 自绘，显示在主屏工作区右下角并于 3 秒后自动隐藏，点击卡片可唤起主窗口；不受 Windows 通知开关与「请勿打扰」影响。Windows 也可能把托盘图标收进溢出区。
+- 通知弹窗由 Pinglet 自绘，显示在主屏工作区右下角并于约 5 秒后自动隐藏，点击卡片可唤起主窗口；不受 Windows 通知开关与「请勿打扰」影响。Windows 也可能把托盘图标收进溢出区。
 - 当前安装包未做代码签名，首次运行可能触发 Windows SmartScreen 提示。
 
 ## License

@@ -34,6 +34,14 @@ export type SessionTooltip = {
 /** 双击会话行时可执行的动作；目前只支持 VSCode 与 CLI 两种入口。 */
 export type SessionAction = "open-vscode" | "open-terminal";
 
+/** 临时隐藏时记录的状态快照，用于在会话状态变化后自动恢复显示。 */
+export type HiddenSessionSnapshot = {
+  status: string;
+  statusUpdatedAt: number | null;
+  alive: boolean | null;
+  sessionId: string | null;
+};
+
 export const BOARD_STATES: readonly BoardState[] = ["blocked", "interrupted", "working", "done"];
 
 type StateMeta = {
@@ -126,6 +134,63 @@ export function sortRows(rows: SessionRow[]): SessionRow[] {
     const rightTime = right.statusUpdatedAt ?? 0;
     return rightTime - leftTime;
   });
+}
+
+/**
+ * 行身份：必须与 Rust 侧 session_key() 保持同一规则，
+ * 用于 DOM 复用、状态突变提醒与临时隐藏集合的 key。
+ */
+export function getRowKey(row: SessionRow): string {
+  if (row.pid !== null) {
+    return `pid:${row.pid}`;
+  }
+  if (row.cwd !== null) {
+    return `cwd:${row.cwd}`;
+  }
+  return `name:${row.name}`;
+}
+
+/** 只有已完成会话允许临时隐藏，避免误藏仍可能告警的会话。 */
+export function canHideSession(state: BoardState): boolean {
+  return state === "done";
+}
+
+export function createHiddenSessionSnapshot(row: SessionRow): HiddenSessionSnapshot {
+  return {
+    status: row.status,
+    statusUpdatedAt: row.statusUpdatedAt,
+    alive: row.alive,
+    sessionId: row.sessionId,
+  };
+}
+
+/**
+ * 过滤临时隐藏的会话，并清理失效快照。
+ * 清理规则：本轮 rows 中已不存在该 key、状态 / 更新时间 / 存活标志 / 会话 ID 任一变化，
+ * 都视为会话身份或状态已变，立即恢复显示。alive 与 sessionId 用于防止进程退出变告警
+ * 或 PID 被复用时仍被误隐藏。
+ */
+export function applyHiddenSessions(
+  rows: SessionRow[],
+  hidden: Map<string, HiddenSessionSnapshot>,
+): SessionRow[] {
+  const rowsByKey = new Map(rows.map((row) => [getRowKey(row), row]));
+  for (const [key, snapshot] of hidden) {
+    const row = rowsByKey.get(key);
+    if (row === undefined || !matchesHiddenSnapshot(row, snapshot)) {
+      hidden.delete(key);
+    }
+  }
+  return rows.filter((row) => !hidden.has(getRowKey(row)));
+}
+
+function matchesHiddenSnapshot(row: SessionRow, snapshot: HiddenSessionSnapshot): boolean {
+  return (
+    row.status === snapshot.status &&
+    row.statusUpdatedAt === snapshot.statusUpdatedAt &&
+    row.alive === snapshot.alive &&
+    row.sessionId === snapshot.sessionId
+  );
 }
 
 function formatDuration(timestamp: number | null, now: number): string {

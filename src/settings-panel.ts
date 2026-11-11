@@ -35,6 +35,7 @@ import {
 
 export type SettingsPanelHandle = {
   syncSystemState: () => Promise<void>;
+  setHiddenSessionCount: (count: number) => void;
 };
 
 type PreviewableReminderKey = Exclude<ReminderKey, "none">;
@@ -44,6 +45,7 @@ type SettingsPanelOptions = {
   onPreviewReminder: (key: PreviewableReminderKey) => void;
   onResetSettings: () => Promise<void>;
   onClickThroughChange: (enabled: boolean) => void;
+  onRestoreHidden: () => number;
   onClose: () => void;
 };
 
@@ -394,7 +396,7 @@ export function mountSettingsPanel(
     },
   );
   systemNotificationsRow.row.title =
-    "仅在窗口隐藏或最小化且出现新异常时，在主屏右下角弹出应用内通知卡片，3 秒后自动隐藏；与提醒方式相互独立";
+    "仅在窗口隐藏或最小化且出现新异常时，在主屏右下角弹出应用内通知卡片，5 秒后自动隐藏；与提醒方式相互独立";
   appearanceSection.append(systemNotificationsRow.row);
 
   const doNotDisturbRow = createSwitchRow("免打扰", initial.doNotDisturb, false, (enabled) => {
@@ -477,7 +479,22 @@ export function mountSettingsPanel(
   const author = document.createElement("p");
   author.className = "about-line";
   author.textContent = "Designed & Built by fongzhizhi";
-  aboutSection.append(version, author);
+
+  const hiddenHint = document.createElement("p");
+  hiddenHint.className = "about-line";
+  hiddenHint.textContent = "右键已完成会话可临时隐藏，状态变化后自动恢复。";
+
+  const restoreHiddenButton = document.createElement("button");
+  restoreHiddenButton.type = "button";
+  restoreHiddenButton.className = "restore-hidden-btn";
+  restoreHiddenButton.disabled = true;
+  restoreHiddenButton.textContent = "恢复隐藏的会话";
+  restoreHiddenButton.addEventListener("click", () => {
+    const count = options.onRestoreHidden();
+    showStatus(count > 0 ? `已恢复 ${count} 个隐藏会话` : "没有可恢复的隐藏会话", false);
+  });
+
+  aboutSection.append(version, author, hiddenHint, restoreHiddenButton);
   fragment.append(aboutSection);
 
   // ============ 底部 ============
@@ -639,8 +656,14 @@ export function mountSettingsPanel(
     }
   }
 
+  function setHiddenSessionCount(count: number): void {
+    restoreHiddenButton.disabled = count === 0;
+    restoreHiddenButton.textContent = count === 0 ? "恢复隐藏的会话" : `恢复隐藏的会话（${count}）`;
+  }
+
   subscribeSettings(syncControls);
   syncControls();
+  setHiddenSessionCount(0);
 
-  return { syncSystemState };
+  return { syncSystemState, setHiddenSessionCount };
 }

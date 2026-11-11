@@ -2,13 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   BOARD_STATES,
   STATE_META,
+  applyHiddenSessions,
   buildTooltip,
+  canHideSession,
   classify,
+  createHiddenSessionSnapshot,
   describeDuration,
   directoryName,
   entrypointLabel,
+  getRowKey,
   sessionAction,
   sortRows,
+  type HiddenSessionSnapshot,
   type SessionRow,
 } from "./session-state";
 
@@ -286,5 +291,118 @@ describe("buildTooltip", () => {
     expect(tooltip.lines).toContain("最后更新: 未知");
     expect(tooltip.lines).toContain("PID: 未知");
     expect(tooltip.hint).toBeNull();
+  });
+});
+
+describe("getRowKey", () => {
+  it("should prefer pid, then cwd, then name when building the identity", () => {
+    const withPid = makeRow({ pid: 42, cwd: "D:\\a", name: "n" });
+    const withCwd = makeRow({ pid: null, cwd: "D:\\a", name: "n" });
+    const withName = makeRow({ pid: null, cwd: null, name: "n" });
+
+    expect(getRowKey(withPid)).toBe("pid:42");
+    expect(getRowKey(withCwd)).toBe("cwd:D:\\a");
+    expect(getRowKey(withName)).toBe("name:n");
+  });
+});
+
+describe("canHideSession", () => {
+  it.each([
+    [false, "blocked"],
+    [false, "interrupted"],
+    [false, "working"],
+    [true, "done"],
+  ] as const)("should return %s when the state is %s", (expected, state) => {
+    expect(canHideSession(state)).toBe(expected);
+  });
+});
+
+describe("applyHiddenSessions", () => {
+  it("should remove a hidden session from visible rows when its snapshot is unchanged", () => {
+    const row = makeRow({ status: "idle", statusUpdatedAt: NOW - MINUTE });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+
+    const visible = applyHiddenSessions([row], hidden);
+
+    expect(visible).toEqual([]);
+    expect(hidden.size).toBe(1);
+  });
+
+  it("should keep other sessions visible when one matching session is hidden", () => {
+    const hiddenRow = makeRow({ pid: 1, status: "idle" });
+    const visibleRow = makeRow({ pid: 2, status: "working" });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(hiddenRow), createHiddenSessionSnapshot(hiddenRow)],
+    ]);
+
+    const visible = applyHiddenSessions([hiddenRow, visibleRow], hidden);
+
+    expect(visible.map((row) => row.pid)).toEqual([2]);
+  });
+
+  it("should restore the session and drop the snapshot when the row disappears", () => {
+    const row = makeRow({ status: "idle" });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+
+    const visible = applyHiddenSessions([], hidden);
+
+    expect(visible).toEqual([]);
+    expect(hidden.size).toBe(0);
+  });
+
+  it("should restore the session when its status changes", () => {
+    const row = makeRow({ status: "idle" });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+    const changed = { ...row, status: "working" };
+
+    const visible = applyHiddenSessions([changed], hidden);
+
+    expect(visible).toEqual([changed]);
+    expect(hidden.size).toBe(0);
+  });
+
+  it("should restore the session when statusUpdatedAt changes after re-entering done", () => {
+    const row = makeRow({ status: "idle", statusUpdatedAt: NOW - MINUTE });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+    const changed = { ...row, statusUpdatedAt: NOW };
+
+    const visible = applyHiddenSessions([changed], hidden);
+
+    expect(visible).toEqual([changed]);
+    expect(hidden.size).toBe(0);
+  });
+
+  it("should restore the session when the process exits while hidden", () => {
+    const row = makeRow({ status: "idle", alive: true });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+    const changed = { ...row, alive: false };
+
+    const visible = applyHiddenSessions([changed], hidden);
+
+    expect(visible).toEqual([changed]);
+    expect(hidden.size).toBe(0);
+  });
+
+  it("should restore the session when the pid is reused by another session", () => {
+    const row = makeRow({ status: "idle", sessionId: "session-1" });
+    const hidden = new Map<string, HiddenSessionSnapshot>([
+      [getRowKey(row), createHiddenSessionSnapshot(row)],
+    ]);
+    const changed = { ...row, sessionId: "session-2" };
+
+    const visible = applyHiddenSessions([changed], hidden);
+
+    expect(visible).toEqual([changed]);
+    expect(hidden.size).toBe(0);
   });
 });

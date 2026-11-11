@@ -145,6 +145,34 @@ export async function onWindowMoved(handler: () => void): Promise<UnlistenFn> {
   });
 }
 
+/** 监听 Rust 的隐藏请求；payload 为本次隐藏代号，用于回调时校验是否已过期。 */
+export async function onWindowHideRequest(
+  handler: (generation: number) => void,
+): Promise<UnlistenFn> {
+  if (!IS_TAURI) {
+    return () => {};
+  }
+  return listen<number>("pinglet://window-hide-request", (event) => {
+    handler(event.payload);
+  });
+}
+
+/** 监听 Rust 的显示请求，在原生窗口显示后播放展开动画。 */
+export async function onWindowShowRequest(handler: () => void): Promise<UnlistenFn> {
+  if (!IS_TAURI) {
+    return () => {};
+  }
+  return listen("pinglet://window-show-request", () => {
+    handler();
+  });
+}
+
+/** 收起动画结束后真正隐藏原生窗口；代号过期时 Rust 侧忽略，不误杀重新显示的窗口。 */
+export async function hideMainWindowNow(generation: number): Promise<void> {
+  requireTauri();
+  await invoke("hide_main_window_now", { generation });
+}
+
 export async function sampleBackdropLuminance(): Promise<number | null> {
   if (!IS_TAURI) {
     return null;

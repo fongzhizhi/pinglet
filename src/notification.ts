@@ -22,8 +22,8 @@ type NotificationPayload = {
 };
 
 const EVENT_NOTIFICATION_SHOW = "pinglet://notification-show";
-/** 卡片完整停留时长；Rust 侧另有 5 秒兜底隐藏。 */
-const AUTO_HIDE_MS = 3000;
+/** 卡片完整停留时长；Rust 侧另有 8 秒兜底隐藏。 */
+const AUTO_HIDE_MS = 5000;
 /** 淡出动画时长，提前于真正隐藏触发。 */
 const LEAVE_ANIMATION_MS = 240;
 /** body 四周留白，与 notification.css 的 padding 保持一致。 */

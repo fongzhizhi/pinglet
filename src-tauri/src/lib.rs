@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -36,7 +35,11 @@ const WINDOW_LABEL: &str = "main";
 const NOTIFICATION_WINDOW_LABEL: &str = "notification";
 const EVENT_WINDOW_VISIBILITY: &str = "pinglet://window-visibility";
 const EVENT_WINDOW_MOVED: &str = "pinglet://window-moved";
+const EVENT_WINDOW_HIDE_REQUEST: &str = "pinglet://window-hide-request";
+const EVENT_WINDOW_SHOW_REQUEST: &str = "pinglet://window-show-request";
 const EVENT_NOTIFICATION_SHOW: &str = "pinglet://notification-show";
+/// 前端收起动画约 160ms；超过这个时间仍未收到隐藏命令就直接隐藏，避免窗口卡在可见态。
+const WINDOW_HIDE_FALLBACK: Duration = Duration::from_millis(260);
 const TRAY_ID: &str = "pinglet-tray";
 const TRAY_MENU_SHOW: &str = "show";
 const TRAY_MENU_SETTINGS: &str = "settings";
@@ -58,11 +61,35 @@ const MAX_TITLE_CHARS: usize = 200;
 const TRANSCRIPT_MISS_CACHE_TTL: Duration = Duration::from_secs(30);
 /// 默认窗口宽度（逻辑像素），与 tauri.conf.json / 前端默认值保持一致。
 const DEFAULT_WINDOW_WIDTH_LOGICAL: f64 = 320.0;
-/// 托盘监视线程以 200ms 为粒度醒来，闪烁相位由 600ms 时间片决定；会话采集周期为 5 秒。
+/// 托盘监视线程以 80ms（约 12.5fps）为粒度推进动画帧；会话采集周期为 5 秒。
 /// NOTE: 隐藏窗口后 WebView2 会节流前端定时器，托盘与通知弹窗必须由 Rust 侧自行采集。
-const TRAY_MONITOR_TICK: Duration = Duration::from_millis(200);
-const TRAY_BLINK_PHASE: Duration = Duration::from_millis(600);
+const TRAY_MONITOR_TICK: Duration = Duration::from_millis(80);
 const SESSION_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// 托盘动画总开关：真机出现高频 set_icon 导致闪烁 / 图标消失时置 false 退回静态图标。
+const TRAY_ANIMATION_ENABLED: bool = true;
+/// 进行中：透明度呼吸（100% ↔ 25%）叠加轻微缩放（100% ↔ 90%），周期约 1.5 秒。
+/// NOTE: 16px 托盘下纯 alpha 变化不够醒目，叠加轻微缩放让呼吸在深浅任务栏上都可见。
+const TRAY_WORKING_FRAME_COUNT: usize = 15;
+const TRAY_WORKING_PERIOD: Duration = Duration::from_millis(1500);
+const TRAY_WORKING_MIN_ALPHA: f64 = 0.25;
+const TRAY_WORKING_MIN_SCALE: f64 = 0.9;
+/// 告警：整枚图标隐藏 / 显示交替闪烁，每 500ms 切换一次，周期 1 秒。
+/// NOTE: 16px 下缩放下压不够醒目；借鉴微信消息提示，直接消失再出现最容易被注意到。
+const TRAY_ALERT_FRAME_COUNT: usize = 10;
+const TRAY_ALERT_PERIOD: Duration = Duration::from_millis(1000);
+/// 隐藏帧保留的最低 alpha。
+/// NOTE: Windows 会把 alpha 全为 0 的 32bpp 图标按不透明黑色绘制（RGB 为黑时就是黑方块）；
+/// 保留 1/255 才能走 alpha 混合，视觉上仍不可见。
+const TRAY_HIDDEN_ALPHA: u8 = 1;
+/// 托盘专用图标：原三色信号图形 + 深绿空心圆角描边，内部保持透明。
+/// NOTE: 深绿在亮 / 暗任务栏上都有明确轮廓，同时比纯黑更接近品牌色。
+const TRAY_BADGE_BORDER_COLOR: [u8; 3] = [4, 120, 87];
+/// 图形缩到 0.85，与 2px 描边留出间距，避免红色弧线贴到边框。
+const TRAY_BADGE_GLYPH_SCALE: f64 = 0.85;
+/// 圆角半径占短边的比例，接近 Windows 11 应用图标的圆角。
+const TRAY_BADGE_CORNER_RATIO: f64 = 0.22;
+/// 描边宽度占短边的比例，32px 下约 2px，缩放到 16px 托盘后约 1px。
+const TRAY_BADGE_BORDER_RATIO: f64 = 0.0625;
 /// 通知弹窗单条最多列举数与标题截断长度，避免内容过长。
 const NOTIFICATION_MAX_ITEMS: usize = 3;
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 24;
@@ -72,23 +99,12 @@ const NOTIFICATION_WINDOW_WIDTH_LOGICAL: f64 = 380.0;
 const NOTIFICATION_WINDOW_MIN_HEIGHT_LOGICAL: f64 = 96.0;
 const NOTIFICATION_WINDOW_HEIGHT_LOGICAL: f64 = 176.0;
 const NOTIFICATION_WINDOW_MARGIN_LOGICAL: f64 = 16.0;
-const NOTIFICATION_AUTO_HIDE_FALLBACK: Duration = Duration::from_secs(5);
-/// 托盘合成图标：使用默认窗口图标的完整画布，圆环最细 3px 并随图标尺寸等比加粗。
-const TRAY_RING_MIN_THICKNESS: f64 = 3.0;
-const TRAY_RING_THICKNESS_DIVISOR: f64 = 10.0;
-/// 右下角实心角标：半径为短边的 24%，16px 托盘尺寸下仍有约 8px 直径，比细圆环醒目。
-const TRAY_BADGE_RADIUS_RATIO: f64 = 0.24;
-const TRAY_BADGE_MARGIN: f64 = 1.0;
-const ALERT_COLOR: [u8; 4] = [0xFF, 0x4D, 0x4F, 0xFF];
-const WORKING_COLOR: [u8; 4] = [0x2E, 0xD5, 0x73, 0xFF];
+const NOTIFICATION_AUTO_HIDE_FALLBACK: Duration = Duration::from_secs(8);
 /// 自动主题采样：窗口底边下方 6 逻辑像素处横向取 12 个点，取亮度中位数。
 const BACKDROP_SAMPLE_OFFSET_LOGICAL: f64 = 6.0;
 const BACKDROP_SAMPLE_COUNT: i32 = 12;
 /// 与 tauri-plugin-window-state 的默认文件名一致，用于判断是否已有可恢复的位置。
 const WINDOW_STATE_FILENAME: &str = tauri_plugin_window_state::DEFAULT_FILENAME;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 进程父链遍历上限，避免异常数据导致死循环。
 #[cfg(target_os = "windows")]
@@ -332,38 +348,111 @@ enum TrayIconKind {
     Alert,
 }
 
-/// 三种托盘图标在启动时一次合成，闪烁时只切换引用，不做重复缩放。
+/// 三种托盘状态在启动时预生成动画帧，运行期只切换帧引用，不做重复缩放。
 struct TrayIcons {
-    idle: Image<'static>,
-    working: Image<'static>,
-    alert: Image<'static>,
+    idle: Vec<Image<'static>>,
+    working: Vec<Image<'static>>,
+    alert: Vec<Image<'static>>,
 }
 
 impl TrayIcons {
-    fn get(&self, kind: TrayIconKind) -> &Image<'static> {
-        match kind {
+    fn get(&self, kind: TrayIconKind, frame: usize) -> &Image<'static> {
+        let frames = match kind {
             TrayIconKind::Idle => &self.idle,
             TrayIconKind::Working => &self.working,
             TrayIconKind::Alert => &self.alert,
+        };
+        let index = frame % frames.len();
+        &frames[index]
+    }
+}
+
+/// 托盘专用图标：原三色信号图形 + 深绿空心圆角描边。
+/// NOTE: 圆底会裁掉方形画布四角的红色弧线，只能把图形缩到 0.765；圆角方框能容纳更大的图形。
+fn build_tray_badge_icon(base: &Image<'_>) -> Image<'static> {
+    let width = base.width();
+    let height = base.height();
+    let expected_len = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || base.rgba().len() < expected_len {
+        return base.clone().to_owned();
+    }
+
+    let glyph = scale_tray_icon(base, TRAY_BADGE_GLYPH_SCALE);
+    let side = f64::from(width.min(height));
+    let outer_radius = side * TRAY_BADGE_CORNER_RATIO;
+    let border = side * TRAY_BADGE_BORDER_RATIO;
+    let inner_radius = (outer_radius - border).max(0.0);
+    let mut pixels = vec![0_u8; expected_len];
+
+    for y in 0..height {
+        for x in 0..width {
+            let outer = rounded_rect_coverage(x, y, width, height, 0.0, outer_radius);
+            if outer <= 0.0 {
+                continue;
+            }
+
+            // 外框覆盖率减去内框覆盖率就是描边环；环内像素保持透明，只叠图形。
+            let inner = if border > 0.0 {
+                rounded_rect_coverage(x, y, width, height, border, inner_radius)
+            } else {
+                0.0
+            };
+            let ring = (outer - inner).clamp(0.0, 1.0);
+            let index = ((y * width + x) * 4) as usize;
+            let glyph_alpha = f64::from(glyph.rgba()[index + 3]) / 255.0;
+            let alpha = glyph_alpha + ring * (1.0 - glyph_alpha);
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            for channel in 0..3 {
+                let border_color = f64::from(TRAY_BADGE_BORDER_COLOR[channel]);
+                let glyph_color = f64::from(glyph.rgba()[index + channel]);
+                let premultiplied =
+                    glyph_color * glyph_alpha + border_color * ring * (1.0 - glyph_alpha);
+                pixels[index + channel] = (premultiplied / alpha).round().clamp(0.0, 255.0) as u8;
+            }
+            pixels[index + 3] = (alpha * 255.0).round() as u8;
         }
     }
+
+    Image::new_owned(pixels, width, height)
+}
+
+/// 像素中心到圆角矩形边界的近似距离，返回 0–1 覆盖率做 1px 抗锯齿。
+/// `inset` 表示从画布边缘向内收缩的距离，用于计算描边内边界。
+fn rounded_rect_coverage(x: u32, y: u32, width: u32, height: u32, inset: f64, radius: f64) -> f64 {
+    let half_width = f64::from(width) / 2.0 - inset;
+    let half_height = f64::from(height) / 2.0 - inset;
+    let offset_x = (f64::from(x) + 0.5 - f64::from(width) / 2.0).abs() - (half_width - radius);
+    let offset_y = (f64::from(y) + 0.5 - f64::from(height) / 2.0).abs() - (half_height - radius);
+    let outside = offset_x.max(0.0).hypot(offset_y.max(0.0));
+    let inside = offset_x.max(offset_y).min(0.0);
+    (0.5 - (outside + inside - radius)).clamp(0.0, 1.0)
 }
 
 fn build_tray_icons(base: &Image<'_>) -> TrayIcons {
     TrayIcons {
-        idle: build_tray_icon(base, None),
-        working: build_tray_icon(base, Some(WORKING_COLOR)),
-        alert: build_tray_icon(base, Some(ALERT_COLOR)),
+        idle: vec![base.clone().to_owned()],
+        working: build_breathing_frames(
+            base,
+            TRAY_WORKING_FRAME_COUNT,
+            TRAY_WORKING_MIN_ALPHA,
+            TRAY_WORKING_MIN_SCALE,
+        ),
+        alert: build_alert_frames(base, TRAY_ALERT_FRAME_COUNT),
     }
 }
 
-/// 托盘当前展示的计数与上次写入的图标 / tooltip，避免每 200ms 重复设置。
+/// 托盘当前展示的计数与上次写入的图标帧 / tooltip，避免每 80ms 重复设置。
 struct TrayRuntime {
     blocked: usize,
     interrupted: usize,
     working: usize,
     alert_keys: HashSet<String>,
-    last_icon: Option<TrayIconKind>,
+    last_icon: Option<(TrayIconKind, usize)>,
+    last_animation_kind: Option<TrayIconKind>,
+    animation_started: Option<Instant>,
     last_tooltip: Option<String>,
 }
 
@@ -374,16 +463,51 @@ impl Default for TrayRuntime {
             interrupted: 0,
             working: 0,
             alert_keys: HashSet::new(),
-            last_icon: Some(TrayIconKind::Idle),
+            last_icon: Some((TrayIconKind::Idle, 0)),
+            last_animation_kind: None,
+            animation_started: None,
             last_tooltip: Some(NOTIFICATION_TITLE_PREFIX.to_string()),
         }
     }
 }
 
-/// 保持默认窗口图标的完整尺寸，并叠加状态色：边缘圆环 + 右下角实心角标。
-/// NOTE: 16px 托盘下圆环会被缩到约 1.5px，单靠圆环在深色任务栏上不够醒目；
-/// 实心角标缩后仍有约 8px 直径，进行中与告警状态都能一眼辨识。
-fn build_tray_icon(base: &Image<'_>, ring_color: Option<[u8; 4]>) -> Image<'static> {
+/// 生成进行中呼吸帧：透明度与尺寸按同一条余弦曲线从 100% 平滑降到最低值再回升。
+fn build_breathing_frames(
+    base: &Image<'_>,
+    frame_count: usize,
+    min_alpha: f64,
+    min_scale: f64,
+) -> Vec<Image<'static>> {
+    let frame_count = frame_count.max(1);
+    (0..frame_count)
+        .map(|frame| {
+            let phase = frame as f64 / frame_count as f64 * std::f64::consts::TAU;
+            let breath = 0.5 + 0.5 * phase.cos();
+            let alpha = min_alpha + (1.0 - min_alpha) * breath;
+            let scale = min_scale + (1.0 - min_scale) * breath;
+            let dimmed = scale_tray_alpha(base, alpha);
+            scale_tray_icon(&dimmed, scale)
+        })
+        .collect()
+}
+
+/// 生成告警帧：前半周期显示完整图标，后半周期整枚近乎全透明，形成闪烁。
+fn build_alert_frames(base: &Image<'_>, frame_count: usize) -> Vec<Image<'static>> {
+    let frame_count = frame_count.max(1);
+    let hidden = build_hidden_tray_frame(base);
+    (0..frame_count)
+        .map(|frame| {
+            if alert_frame_visible(frame, frame_count) {
+                base.clone().to_owned()
+            } else {
+                hidden.clone()
+            }
+        })
+        .collect()
+}
+
+/// 生成「隐藏」帧：保留底图像素，alpha 压到最低可见值，避免 Windows 按黑色方块绘制。
+fn build_hidden_tray_frame(base: &Image<'_>) -> Image<'static> {
     let width = base.width();
     let height = base.height();
     let source = base.rgba();
@@ -393,39 +517,112 @@ fn build_tray_icon(base: &Image<'_>, ring_color: Option<[u8; 4]>) -> Image<'stat
     }
 
     let mut pixels = source[..expected_len].to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = TRAY_HIDDEN_ALPHA;
+    }
+    Image::new_owned(pixels, width, height)
+}
 
-    if let Some(color) = ring_color {
-        let short_side = width.min(height) as f64;
-        let center_x = width as f64 / 2.0;
-        let center_y = height as f64 / 2.0;
-        let outer_radius = short_side / 2.0;
-        let thickness = TRAY_RING_MIN_THICKNESS.max(short_side / TRAY_RING_THICKNESS_DIVISOR);
-        let inner_radius = (outer_radius - thickness).max(0.0);
-        let badge_radius = short_side * TRAY_BADGE_RADIUS_RATIO;
-        let badge_center_x = width as f64 - badge_radius - TRAY_BADGE_MARGIN;
-        let badge_center_y = height as f64 - badge_radius - TRAY_BADGE_MARGIN;
-        for y in 0..height {
-            for x in 0..width {
-                let pixel_x = x as f64 + 0.5;
-                let pixel_y = y as f64 + 0.5;
-                let distance_x = pixel_x - center_x;
-                let distance_y = pixel_y - center_y;
-                let distance = (distance_x * distance_x + distance_y * distance_y).sqrt();
-                let in_ring = distance <= outer_radius && distance >= inner_radius;
-                let badge_distance_x = pixel_x - badge_center_x;
-                let badge_distance_y = pixel_y - badge_center_y;
-                let in_badge = badge_distance_x * badge_distance_x
-                    + badge_distance_y * badge_distance_y
-                    <= badge_radius * badge_radius;
-                if in_ring || in_badge {
-                    let index = ((y * width + x) * 4) as usize;
-                    pixels[index..index + 4].copy_from_slice(&color);
+/// 前半周期可见、后半周期隐藏；帧数为奇数时隐藏段多一帧。
+fn alert_frame_visible(frame: usize, frame_count: usize) -> bool {
+    frame < frame_count / 2
+}
+
+/// 只调整 alpha 通道，保留原图像素颜色；透明底上的图形实现整体呼吸。
+fn scale_tray_alpha(base: &Image<'_>, alpha_scale: f64) -> Image<'static> {
+    let width = base.width();
+    let height = base.height();
+    let source = base.rgba();
+    let expected_len = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || source.len() < expected_len {
+        return base.clone().to_owned();
+    }
+
+    let alpha_scale = alpha_scale.clamp(0.0, 1.0);
+    let mut pixels = source[..expected_len].to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = (f64::from(pixel[3]) * alpha_scale).round() as u8;
+    }
+    Image::new_owned(pixels, width, height)
+}
+
+/// 围绕画布中心缩放图标；缩小后四周补透明像素，保证弹跳不越界。
+/// NOTE: 采样先乘 alpha 再插值（预乘 alpha），避免透明边缘与图形混色产生暗边。
+fn scale_tray_icon(base: &Image<'_>, scale: f64) -> Image<'static> {
+    let width = base.width();
+    let height = base.height();
+    let source = base.rgba();
+    let expected_len = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || source.len() < expected_len {
+        return base.clone().to_owned();
+    }
+
+    let scale = scale.clamp(0.0, 1.0);
+    if scale >= 1.0 {
+        return base.clone().to_owned();
+    }
+
+    let mut pixels = vec![0u8; expected_len];
+    let center_x = f64::from(width) / 2.0;
+    let center_y = f64::from(height) / 2.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            // 目标像素中心反向映射到源图坐标，再转换为双线性采样的网格坐标
+            let source_x = (f64::from(x) + 0.5 - center_x) / scale + center_x;
+            let source_y = (f64::from(y) + 0.5 - center_y) / scale + center_y;
+            let grid_x = source_x - 0.5;
+            let grid_y = source_y - 0.5;
+            let x0 = grid_x.floor() as i64;
+            let y0 = grid_y.floor() as i64;
+            let fraction_x = grid_x - x0 as f64;
+            let fraction_y = grid_y - y0 as f64;
+
+            let mut channels = [0.0_f64; 4];
+            for (offset_y, weight_y) in [(0_i64, 1.0 - fraction_y), (1, fraction_y)] {
+                for (offset_x, weight_x) in [(0_i64, 1.0 - fraction_x), (1, fraction_x)] {
+                    let sample_x = x0 + offset_x;
+                    let sample_y = y0 + offset_y;
+                    if sample_x < 0
+                        || sample_y < 0
+                        || sample_x >= i64::from(width)
+                        || sample_y >= i64::from(height)
+                    {
+                        continue;
+                    }
+                    let index = ((sample_y as u32 * width + sample_x as u32) * 4) as usize;
+                    let alpha = f64::from(source[index + 3]) / 255.0;
+                    let weight = weight_x * weight_y;
+                    channels[0] += f64::from(source[index]) * alpha * weight;
+                    channels[1] += f64::from(source[index + 1]) * alpha * weight;
+                    channels[2] += f64::from(source[index + 2]) * alpha * weight;
+                    channels[3] += alpha * weight;
                 }
             }
+
+            let output_alpha = channels[3];
+            if output_alpha <= 0.0 {
+                continue;
+            }
+            let index = ((y * width + x) * 4) as usize;
+            pixels[index] = (channels[0] / output_alpha).round().clamp(0.0, 255.0) as u8;
+            pixels[index + 1] = (channels[1] / output_alpha).round().clamp(0.0, 255.0) as u8;
+            pixels[index + 2] = (channels[2] / output_alpha).round().clamp(0.0, 255.0) as u8;
+            pixels[index + 3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
 
     Image::new_owned(pixels, width, height)
+}
+
+/// 按经过时间计算动画帧，避免依赖 tick 次数导致掉帧后动画变慢。
+fn tray_animation_frame(elapsed: Duration, frame_count: usize, period: Duration) -> usize {
+    if frame_count <= 1 {
+        return 0;
+    }
+    let period_ms = period.as_millis().max(1);
+    let elapsed_ms = elapsed.as_millis() % period_ms;
+    ((elapsed_ms * frame_count as u128) / period_ms) as usize
 }
 
 /// 当前吸附在哪些边缘；用于拖出时保持迟滞，避免每帧都被吸回。
@@ -455,6 +652,8 @@ struct AppState {
     notification_payload: Mutex<Option<NotificationPopupPayload>>,
     /// 每次显示 / 主动隐藏都递增，作废旧的自绘弹窗兜底隐藏计时。
     notification_generation: AtomicU64,
+    /// 主窗口隐藏请求代号：显示或新的隐藏请求都会递增，使旧的延迟隐藏失效。
+    window_hide_generation: AtomicU64,
     monitor_stop: AtomicBool,
 }
 
@@ -477,6 +676,7 @@ impl Default for AppState {
             tray_icons: Mutex::new(None),
             notification_payload: Mutex::new(None),
             notification_generation: AtomicU64::new(0),
+            window_hide_generation: AtomicU64::new(0),
             monitor_stop: AtomicBool::new(false),
         }
     }
@@ -615,7 +815,7 @@ fn activate_session(
     }
 
     if is_vscode_entrypoint(entrypoint.as_deref()) {
-        open_vscode(&directory)
+        activate_vscode_via_window(&directory)
     } else if is_cli_entrypoint(entrypoint.as_deref()) {
         open_terminal(&directory, name.as_deref(), pid)
     } else {
@@ -635,105 +835,6 @@ fn is_cli_entrypoint(entrypoint: Option<&str>) -> bool {
         let lowered = value.to_ascii_lowercase();
         lowered == "claude" || lowered.contains("cli")
     })
-}
-
-fn open_vscode(directory: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let Some(code_exe) = find_vscode_executable() else {
-            return Err("未找到 VSCode".to_string());
-        };
-
-        Command::new(code_exe)
-            // 从 VSCode / Electron 派生的环境可能带有该变量，会让 Code.exe 以 Node 模式运行
-            .env_remove("ELECTRON_RUN_AS_NODE")
-            .arg(directory)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|err| format!("打开 VSCode 失败: {err}"))?;
-
-        // VSCode 已有实例时，系统焦点抢占策略可能让窗口留在后台，由 Pinglet 显式激活
-        reveal_vscode_window(directory);
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("code")
-            .arg(directory)
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("打开 VSCode 失败: {err}"))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn find_vscode_executable() -> Option<PathBuf> {
-    use std::os::windows::process::CommandExt;
-
-    let mut command = Command::new("where");
-    command.arg("code").creation_flags(CREATE_NO_WINDOW);
-    if let Ok(output) = command.output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let path = PathBuf::from(line.trim());
-                let extension = path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default();
-                if extension.eq_ignore_ascii_case("exe") {
-                    return Some(path);
-                }
-                if extension.eq_ignore_ascii_case("cmd") {
-                    if let Some(install_dir) = path.parent().and_then(Path::parent) {
-                        let candidate = install_dir.join("Code.exe");
-                        if candidate.is_file() {
-                            return Some(candidate);
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        eprintln!("pinglet: where code 执行失败");
-    }
-
-    let candidates = [
-        std::env::var_os("LOCALAPPDATA")
-            .map(|base| PathBuf::from(base).join("Programs\\Microsoft VS Code\\Code.exe")),
-        std::env::var_os("ProgramFiles")
-            .map(|base| PathBuf::from(base).join("Microsoft VS Code\\Code.exe")),
-        std::env::var_os("ProgramFiles(x86)")
-            .map(|base| PathBuf::from(base).join("Microsoft VS Code\\Code.exe")),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.is_file())
-}
-
-/// VSCode 已存在实例时，Code.exe 的窗口可能因焦点抢占策略留在后台。
-/// 在独立线程里轮询，等窗口出现后显式激活。
-#[cfg(target_os = "windows")]
-fn reveal_vscode_window(directory: &Path) {
-    let folder = directory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_string());
-
-    std::thread::spawn(move || {
-        const ATTEMPTS: u32 = 25;
-        const INTERVAL_MS: u64 = 100;
-        for _ in 0..ATTEMPTS {
-            if focus_vscode_window(folder.as_deref()) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(INTERVAL_MS));
-        }
-    });
 }
 
 #[cfg(target_os = "windows")]
@@ -795,45 +896,99 @@ fn is_vscode_process_name(name: &str) -> bool {
     name == "code.exe" || name == "code - insiders.exe"
 }
 
+/// 只保留进程名确实是 VSCode 的可见窗口，避免误激活其它 Electron 应用。
 #[cfg(target_os = "windows")]
-fn focus_vscode_window(folder: Option<&str>) -> bool {
-    let candidates = collect_visible_windows();
+fn filter_vscode_windows(
+    system: &System,
+    candidates: Vec<WindowCandidate>,
+) -> Vec<WindowCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            system
+                .process(Pid::from_u32(candidate.pid))
+                .is_some_and(|process| is_vscode_process_name(&process.name().to_string_lossy()))
+        })
+        .collect()
+}
+
+/// 选择目标 VSCode 窗口：标题命中最深目录段者优先，其次命中段更长者；
+/// 没有任何标题命中时，仅在允许且候选唯一的情况下兜底。
+#[cfg(target_os = "windows")]
+fn select_vscode_window<'a>(
+    candidates: &[&'a WindowCandidate],
+    directory: &Path,
+    allow_unique_fallback: bool,
+) -> Result<&'a WindowCandidate, String> {
     if candidates.is_empty() {
-        return false;
+        return Err("未找到可激活的 VSCode 窗口".to_string());
+    }
+
+    let mut scored: Vec<((usize, usize), &'a WindowCandidate)> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            vscode_title_score(&candidate.title, directory).map(|score| (score, *candidate))
+        })
+        .collect();
+    scored.sort_by(|left, right| right.0.cmp(&left.0));
+
+    if let Some((_, target)) = scored.first() {
+        return Ok(*target);
+    }
+    if allow_unique_fallback && candidates.len() == 1 {
+        return Ok(candidates[0]);
+    }
+    Err("找到 VSCode，但无法定位该会话所在的窗口".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn activate_vscode_windows(
+    windows: &[WindowCandidate],
+    directory: &Path,
+    allow_unique_fallback: bool,
+) -> Result<(), String> {
+    let candidates: Vec<&WindowCandidate> = windows.iter().collect();
+    let target = select_vscode_window(&candidates, directory, allow_unique_fallback)?;
+    if activate_window(target.hwnd) {
+        Ok(())
+    } else {
+        Err("找到 VSCode 窗口，但无法切换到前台".to_string())
+    }
+}
+
+/// VSCode 入口：只激活已打开该目录的窗口，不启动新实例、不新开窗口。
+#[cfg(target_os = "windows")]
+fn activate_vscode_window_by_directory(directory: &Path) -> Result<(), String> {
+    let visible = collect_visible_windows();
+    if visible.is_empty() {
+        return Err("未找到可激活的 VSCode 窗口".to_string());
     }
 
     // 同一进程可能有多个顶层窗口；重复 PID 会让 sysinfo 漏掉该进程
-    let mut pids: Vec<Pid> = candidates
+    let mut pids: Vec<Pid> = visible
         .iter()
         .map(|candidate| Pid::from_u32(candidate.pid))
         .collect();
     pids.sort_unstable();
     pids.dedup();
-    let Ok(mut system) = System::new() else {
-        return false;
-    };
+    let mut system = System::new().map_err(|_| "无法读取进程列表".to_string())?;
     system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
 
-    let folder_pattern = folder.map(str::to_lowercase);
-    for candidate in &candidates {
-        let Some(process) = system.process(Pid::from_u32(candidate.pid)) else {
-            continue;
-        };
-        if !is_vscode_process_name(&process.name().to_string_lossy()) {
-            continue;
-        }
-        if let Some(pattern) = folder_pattern.as_deref() {
-            if !candidate.title.to_lowercase().contains(pattern) {
-                continue;
-            }
-        }
+    let windows = filter_vscode_windows(&system, visible);
+    activate_vscode_windows(&windows, directory, true)
+}
 
-        if activate_window(candidate.hwnd) {
-            return true;
-        }
+fn activate_vscode_via_window(directory: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        activate_vscode_window_by_directory(directory)
     }
 
-    false
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = directory;
+        Err("当前平台暂不支持激活窗口".to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -876,22 +1031,25 @@ fn find_vscode_ancestor(system: &System, session_pid: u32) -> Option<u32> {
     vscode_pid
 }
 
-/// 用会话目录的各级目录名匹配 VSCode 窗口标题，返回最长命中段的长度。
+/// 用会话目录的各级目录名匹配 VSCode 窗口标题，返回（目录深度, 命中段长度）。
 ///
 /// VSCode 标题通常是 `<文件名> - <工作区目录> - Visual Studio Code`，
-/// 而会话 cwd 可能位于工作区子目录，因此从完整路径的各级目录名里找命中项。
+/// 而会话 cwd 可能位于工作区子目录。更深的目录段比更长的上层目录名更可信，
+/// 例如 `C:\work\pinglet\src` 应优先命中标题里的 `src`，而不是 `pinglet`。
 #[cfg(target_os = "windows")]
-fn vscode_title_score(title: &str, directory: &Path) -> Option<usize> {
+fn vscode_title_score(title: &str, directory: &Path) -> Option<(usize, usize)> {
     let title = title.to_lowercase();
     directory
         .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(name) => name.to_str(),
-            _ => None,
+        .enumerate()
+        .filter_map(|(depth, component)| {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            let segment = name.to_str()?.to_lowercase();
+            (segment.len() >= MIN_VSCODE_TITLE_SEGMENT_LEN && title.contains(&segment))
+                .then_some((depth, segment.len()))
         })
-        .map(str::to_lowercase)
-        .filter(|segment| segment.len() >= MIN_VSCODE_TITLE_SEGMENT_LEN && title.contains(segment))
-        .map(|segment| segment.len())
         .max()
 }
 
@@ -906,20 +1064,8 @@ fn focus_vscode_session_window(vscode_pid: u32, directory: &Path) -> Result<(), 
         return Err("找到 VSCode 进程，但未找到可激活的窗口".to_string());
     }
 
-    let mut scored: Vec<(usize, &WindowCandidate)> = candidates
-        .iter()
-        .filter_map(|candidate| {
-            vscode_title_score(&candidate.title, directory).map(|score| (score, candidate))
-        })
-        .collect();
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
-
-    let target = scored
-        .first()
-        .map(|(_, candidate)| *candidate)
-        .or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
-        .ok_or_else(|| "找到 VSCode，但无法定位该会话所在的窗口".to_string())?;
-
+    let refs: Vec<&WindowCandidate> = candidates.iter().collect();
+    let target = select_vscode_window(&refs, directory, true)?;
     if activate_window(target.hwnd) {
         Ok(())
     } else {
@@ -937,7 +1083,7 @@ fn open_terminal(directory: &Path, name: Option<&str>, pid: Option<u32>) -> Resu
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (directory, name, pid);
-        Err("当前平台暂不支持激活终端窗口".to_string())
+        Err("当前平台暂不支持激活窗口".to_string())
     }
 }
 
@@ -948,6 +1094,9 @@ fn focus_existing_terminal(
     pid: Option<u32>,
 ) -> Result<(), String> {
     let target = normalize_path_key(&directory.to_string_lossy());
+    let mut failures: Vec<String> = Vec::new();
+    // 唯一 VSCode 窗口兜底只对确认属于 VSCode 上下文的会话启用，避免把 Windows Terminal 会话切错窗口
+    let mut has_vscode_context = false;
 
     let Ok(mut system) = System::new() else {
         return Err("无法读取进程列表".to_string());
@@ -958,13 +1107,17 @@ fn focus_existing_terminal(
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
 
-    // VSCode 集成终端里的 CLI 没有 mintty 窗口，按进程链找到所属 VSCode 并激活
+    // 1. VSCode 集成终端：按进程链找到所属 VSCode 并激活
     if let Some(vscode_pid) = pid.and_then(|session_pid| find_vscode_ancestor(&system, session_pid))
     {
-        return focus_vscode_session_window(vscode_pid, directory);
+        has_vscode_context = true;
+        match focus_vscode_session_window(vscode_pid, directory) {
+            Ok(()) => return Ok(()),
+            Err(err) => failures.push(err),
+        }
     }
 
-    // Git Bash 由 git-bash.exe 启动 mintty，启动目录保留在 --cd 参数中
+    // 2. Git Bash 由 git-bash.exe 启动 mintty，启动目录保留在 --cd 参数中
     let mut mintty_pids: Vec<u32> = Vec::new();
     let mut directory_matched_pids: Vec<u32> = Vec::new();
     for (pid, process) in system.processes() {
@@ -998,39 +1151,56 @@ fn focus_existing_terminal(
             directory_matched_pids.push(pid.as_u32());
         }
     }
-    if mintty_pids.is_empty() {
-        return Err("未找到 Git Bash 窗口，该会话可能未运行在 Git Bash 中".to_string());
-    }
 
     let candidates = collect_visible_windows();
 
-    let directory_candidates: Vec<&WindowCandidate> = candidates
-        .iter()
-        .filter(|candidate| directory_matched_pids.contains(&candidate.pid))
-        .collect();
-    if !directory_candidates.is_empty() {
-        return activate_first(&directory_candidates);
+    if !directory_matched_pids.is_empty() {
+        let directory_candidates: Vec<&WindowCandidate> = candidates
+            .iter()
+            .filter(|candidate| directory_matched_pids.contains(&candidate.pid))
+            .collect();
+        if !directory_candidates.is_empty() {
+            match activate_first(&directory_candidates) {
+                Ok(()) => return Ok(()),
+                Err(err) => failures.push(err),
+            }
+        }
     }
 
-    // 启动目录不足以定位时（例如在窗口内手动 cd），再用 Claude Code 写入的终端标题匹配
-    let Some(pattern) = name
+    // 3. 启动目录不足以定位时（例如在窗口内手动 cd），再用 Claude Code 写入的终端标题匹配
+    if let Some(pattern) = name
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase)
-    else {
-        return Err("未匹配到该会话的 Git Bash 窗口".to_string());
-    };
-
-    let title_candidates: Vec<&WindowCandidate> = candidates
-        .iter()
-        .filter(|candidate| mintty_pids.contains(&candidate.pid))
-        .filter(|candidate| candidate.title.to_lowercase().contains(&pattern))
-        .collect();
-    if title_candidates.is_empty() {
-        return Err("未匹配到该会话的 Git Bash 窗口".to_string());
+    {
+        let title_candidates: Vec<&WindowCandidate> = candidates
+            .iter()
+            .filter(|candidate| mintty_pids.contains(&candidate.pid))
+            .filter(|candidate| candidate.title.to_lowercase().contains(&pattern))
+            .collect();
+        if !title_candidates.is_empty() {
+            match activate_first(&title_candidates) {
+                Ok(()) => return Ok(()),
+                Err(err) => failures.push(err),
+            }
+        } else {
+            failures.push("未匹配到该会话的 Git Bash 窗口".to_string());
+        }
     }
 
-    activate_first(&title_candidates)
+    if mintty_pids.is_empty() {
+        failures.push("未找到 Git Bash 窗口，该会话可能未运行在 Git Bash 中".to_string());
+    }
+
+    // 4. 全局 VSCode 兜底：标题命中始终可尝试；唯一窗口只在确认 VSCode 上下文时兜底
+    let vscode_windows = filter_vscode_windows(&system, candidates);
+    match activate_vscode_windows(&vscode_windows, directory, has_vscode_context) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            failures.push(err);
+            Err(format!("未能激活会话窗口；已尝试: {}", failures.join("；")))
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1207,7 +1377,7 @@ fn set_notification_preferences(
             state.tray_alert_unread.store(true, Ordering::Relaxed);
         }
     }
-    refresh_tray(&app, false);
+    refresh_tray(&app, Instant::now());
 }
 
 /// 恢复默认位置（主屏右上角）并把位置写回 window-state，下次启动不再使用旧坐标。
@@ -1318,10 +1488,11 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .default_window_icon()
         .cloned()
         .ok_or_else(|| tauri::Error::AssetNotFound("默认窗口图标".to_string()))?;
-    let tray_icons = build_tray_icons(&default_icon);
+    let tray_base = build_tray_badge_icon(&default_icon);
+    let tray_icons = build_tray_icons(&tray_base);
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(tray_icons.idle.clone())
+        .icon(tray_icons.idle[0].clone())
         .tooltip(NOTIFICATION_TITLE_PREFIX)
         .show_menu_on_left_click(false)
         .menu(&menu)
@@ -1363,7 +1534,7 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         }
         state.tray_ready.store(true, Ordering::Relaxed);
     }
-    refresh_tray(app, false);
+    refresh_tray(app, Instant::now());
 
     Ok(())
 }
@@ -1394,7 +1565,7 @@ fn sync_window_activity(app: &tauri::AppHandle) {
     sync_show_item(&state, visible);
 
     if active && state.tray_alert_unread.swap(false, Ordering::Relaxed) {
-        refresh_tray(app, false);
+        refresh_tray(app, Instant::now());
     }
 
     if previous != active {
@@ -1404,12 +1575,68 @@ fn sync_window_activity(app: &tauri::AppHandle) {
     }
 }
 
+/// 真正隐藏主窗口；调用方负责代号校验。
+fn hide_main_window_internal(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Ok(());
+    };
+    if !window.is_visible().unwrap_or(false) {
+        return Ok(());
+    }
+    window
+        .hide()
+        .map_err(|err| format!("隐藏窗口失败: {err}"))?;
+    sync_window_activity(app);
+    Ok(())
+}
+
+/// 隐藏入口：先通知前端播放收起动画；前端无响应时由 260ms 兜底直接隐藏。
+/// NOTE: 每次显示都会递增代号（见 `show_main_window`），延迟隐藏不会误杀刚重新显示的窗口。
+fn request_hide_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+
+    let state = app.state::<AppState>();
+    let generation = state.window_hide_generation.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if let Err(err) = window.emit(EVENT_WINDOW_HIDE_REQUEST, generation) {
+        eprintln!("pinglet: 广播窗口隐藏请求失败: {err}");
+        if let Err(err) = hide_main_window_internal(app) {
+            eprintln!("pinglet: {err}");
+        }
+        return;
+    }
+
+    let thread_app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("pinglet-window-hide".to_string())
+        .spawn(move || {
+            std::thread::sleep(WINDOW_HIDE_FALLBACK);
+            let state = thread_app.state::<AppState>();
+            if state.window_hide_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if let Err(err) = hide_main_window_internal(&thread_app) {
+                eprintln!("pinglet: 兜底{err}");
+            }
+        });
+    if let Err(err) = spawned {
+        eprintln!("pinglet: 启动隐藏兜底线程失败: {err}");
+    }
+}
+
 /// 显示并聚焦主窗口：穿透状态下恢复可点击，最小化时先还原。
 fn show_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
     let state = app.state::<AppState>();
+    // 先递增代号，取消可能仍在等待的延迟隐藏
+    state.window_hide_generation.fetch_add(1, Ordering::Relaxed);
 
     // 穿透状态下窗口收不到任何点击，必须先恢复可点击
     if state.click_through.load(Ordering::Relaxed) {
@@ -1429,6 +1656,10 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Err(err) = window.set_focus() {
         eprintln!("pinglet: 聚焦窗口失败: {err}");
     }
+    // show() 之后通知前端从收起态展开；前端未收起时该请求无副作用
+    if let Err(err) = window.emit(EVENT_WINDOW_SHOW_REQUEST, ()) {
+        eprintln!("pinglet: 广播窗口显示请求失败: {err}");
+    }
     sync_window_activity(app);
 }
 
@@ -1439,23 +1670,8 @@ fn toggle_window_visibility(app: &tauri::AppHandle) {
     };
 
     match window.is_visible() {
-        Ok(true) => {
-            if let Err(err) = window.hide() {
-                eprintln!("pinglet: 隐藏窗口失败: {err}");
-            } else {
-                sync_window_activity(app);
-            }
-        }
-        Ok(false) => {
-            if let Err(err) = window.show() {
-                eprintln!("pinglet: 显示窗口失败: {err}");
-                return;
-            }
-            if let Err(err) = window.set_focus() {
-                eprintln!("pinglet: 聚焦窗口失败: {err}");
-            }
-            sync_window_activity(app);
-        }
+        Ok(true) => request_hide_main_window(app),
+        Ok(false) => show_main_window(app),
         Err(err) => eprintln!("pinglet: 读取窗口可见性失败: {err}"),
     }
 }
@@ -1487,20 +1703,14 @@ fn toggle_main_window(app: &tauri::AppHandle) {
     }
 
     match window.is_visible() {
-        Ok(true) => {
-            if let Err(err) = window.hide() {
-                eprintln!("pinglet: 隐藏窗口失败: {err}");
-            } else {
-                sync_window_activity(app);
-            }
-        }
+        Ok(true) => request_hide_main_window(app),
         Ok(false) => show_main_window(app),
         Err(err) => eprintln!("pinglet: 读取窗口可见性失败: {err}"),
     }
 }
 
-/// 根据当前计数与闪烁相位更新托盘图标与 tooltip，只在内容变化时写入。
-fn refresh_tray(app: &tauri::AppHandle, blink_dim: bool) {
+/// 根据当前计数与动画相位更新托盘图标帧与 tooltip，只在内容变化时写入。
+fn refresh_tray(app: &tauri::AppHandle, now: Instant) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
@@ -1519,23 +1729,47 @@ fn refresh_tray(app: &tauri::AppHandle, blink_dim: bool) {
         return;
     };
 
+    // 优先级：可播放的告警动画 > 进行中呼吸 > 静态空闲
     let has_alert = runtime.blocked + runtime.interrupted > 0;
-    let blinking = has_alert && unread && !dnd && !active;
-    let kind = if has_alert {
-        if blinking && blink_dim {
-            TrayIconKind::Idle
-        } else {
-            TrayIconKind::Alert
-        }
+    let alert_animated = has_alert && unread && !dnd && !active;
+    let kind = if alert_animated {
+        TrayIconKind::Alert
     } else if runtime.working > 0 {
         TrayIconKind::Working
     } else {
         TrayIconKind::Idle
     };
+    let display_kind = if TRAY_ANIMATION_ENABLED {
+        kind
+    } else {
+        TrayIconKind::Idle
+    };
+    let (frame_count, period) = if TRAY_ANIMATION_ENABLED {
+        match display_kind {
+            TrayIconKind::Working => (TRAY_WORKING_FRAME_COUNT, TRAY_WORKING_PERIOD),
+            TrayIconKind::Alert => (TRAY_ALERT_FRAME_COUNT, TRAY_ALERT_PERIOD),
+            TrayIconKind::Idle => (1, Duration::ZERO),
+        }
+    } else {
+        (1, Duration::ZERO)
+    };
 
-    if runtime.last_icon != Some(kind) {
-        match tray.set_icon(Some(icons.get(kind).clone())) {
-            Ok(()) => runtime.last_icon = Some(kind),
+    // 状态切换时重新起算动画，保证告警弹跳从完整图标开始
+    if runtime.last_animation_kind != Some(display_kind) {
+        runtime.last_animation_kind = Some(display_kind);
+        runtime.animation_started = Some(now);
+    }
+    let frame = if frame_count <= 1 {
+        0
+    } else {
+        let started = runtime.animation_started.unwrap_or(now);
+        tray_animation_frame(now.duration_since(started), frame_count, period)
+    };
+    let icon_key = (display_kind, frame);
+
+    if runtime.last_icon != Some(icon_key) {
+        match tray.set_icon(Some(icons.get(display_kind, frame).clone())) {
+            Ok(()) => runtime.last_icon = Some(icon_key),
             Err(err) => eprintln!("pinglet: 更新托盘图标失败: {err}"),
         }
     }
@@ -1563,8 +1797,6 @@ fn spawn_session_monitor(app: tauri::AppHandle) {
 fn session_monitor_loop(app: tauri::AppHandle) {
     let mut first_scan = true;
     let mut last_poll: Option<Instant> = None;
-    let mut last_blink = Instant::now();
-    let mut blink_dim = false;
 
     loop {
         if app.state::<AppState>().monitor_stop.load(Ordering::Relaxed) {
@@ -1582,12 +1814,8 @@ fn session_monitor_loop(app: tauri::AppHandle) {
             poll_session_state(&app, snapshot, &mut first_scan);
         }
 
-        if now.duration_since(last_blink) >= TRAY_BLINK_PHASE {
-            last_blink = now;
-            blink_dim = !blink_dim;
-            refresh_tray(&app, blink_dim);
-        }
-
+        // 动画帧时间驱动：每 tick 重新计算帧索引，掉帧时不会整体变慢
+        refresh_tray(&app, now);
         std::thread::sleep(TRAY_MONITOR_TICK);
     }
 }
@@ -1641,7 +1869,7 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
     }
 
     *first_scan = false;
-    refresh_tray(app, false);
+    refresh_tray(app, Instant::now());
 }
 
 /// 窗口可移动到的四条极限位置（物理像素）。
@@ -2261,7 +2489,7 @@ fn hide_notification_window_raw(window: &tauri::WebviewWindow) -> Result<(), Str
     }
 }
 
-/// 更新内容并显示通知弹窗；前端负责 3 秒淡出，Rust 侧另有兜底隐藏。
+/// 更新内容并显示通知弹窗；前端负责 5 秒淡出，Rust 侧另有兜底隐藏。
 fn show_notification_popup(
     app: &tauri::AppHandle,
     payload: NotificationPopupPayload,
@@ -2286,7 +2514,7 @@ fn show_notification_popup(
     Ok(())
 }
 
-/// 兜底隐藏：前端 3 秒淡出未生效时，5 秒后由 Rust 收起；再次弹窗会作废旧计时。
+/// 兜底隐藏：前端 5 秒淡出未生效时，8 秒后由 Rust 收起；再次弹窗会作废旧计时。
 fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
     let generation = app
         .state::<AppState>()
@@ -2345,6 +2573,18 @@ fn hide_notification_window(app: tauri::AppHandle) {
 fn open_main_window(app: tauri::AppHandle) {
     hide_notification_window(app.clone());
     show_main_window(&app);
+}
+
+/// 收起动画结束后由前端调用；代号过期说明窗口已重新显示，直接忽略。
+#[tauri::command]
+fn hide_main_window_now(app: tauri::AppHandle, generation: u64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.window_hide_generation.load(Ordering::Relaxed) != generation {
+        return Ok(());
+    }
+    // 本次隐藏已执行，递增代号让兜底线程与迟到的重复调用失效
+    state.window_hide_generation.fetch_add(1, Ordering::Relaxed);
+    hide_main_window_internal(&app)
 }
 
 /// 前端按内容实测高度调整弹窗，避免透明空白区域遮挡桌面点击。
@@ -2471,6 +2711,7 @@ pub fn run() {
             get_notification_payload,
             hide_notification_window,
             open_main_window,
+            hide_main_window_now,
             resize_notification_window,
             reset_window_position,
             sample_backdrop_luminance,
@@ -2912,23 +3153,216 @@ mod tests {
     }
 
     #[test]
-    fn tray_icon_keeps_full_size_and_draws_ring_and_badge() {
+    fn tray_icon_frames_keep_canvas_size_and_alpha_range() {
         let base = Image::new_owned(vec![255_u8; 20 * 20 * 4], 20, 20);
+        let icons = build_tray_icons(&base);
 
-        let plain = build_tray_icon(&base, None);
-        // 不再缩放：四角、中心与角标位置都保留原图像素
-        assert_eq!(&plain.rgba()[0..4], &[255, 255, 255, 255]);
+        assert_eq!(icons.idle.len(), 1);
+        assert_eq!(icons.working.len(), TRAY_WORKING_FRAME_COUNT);
+        assert_eq!(icons.alert.len(), TRAY_ALERT_FRAME_COUNT);
+
+        // 所有帧保持与底图相同的画布尺寸，不改变图标尺寸
+        for image in icons
+            .idle
+            .iter()
+            .chain(icons.working.iter())
+            .chain(icons.alert.iter())
+        {
+            assert_eq!((image.width(), image.height()), (20, 20));
+        }
+
+        // 呼吸帧同时降低 alpha 并轻微收缩：首帧完全不透明且铺满画布，
+        // 最暗帧中心保留颜色、四角因收缩变成透明
         let center = ((10 * 20 + 10) * 4) as usize;
-        assert_eq!(&plain.rgba()[center..center + 4], &[255, 255, 255, 255]);
-        let badge = ((14 * 20 + 14) * 4) as usize;
-        assert_eq!(&plain.rgba()[badge..badge + 4], &[255, 255, 255, 255]);
+        let alphas: Vec<u8> = icons
+            .working
+            .iter()
+            .map(|image| image.rgba()[center + 3])
+            .collect();
+        assert_eq!(alphas[0], 255);
+        let darkest_index = alphas
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, alpha)| **alpha)
+            .map(|(index, _)| index)
+            .expect("darkest frame");
+        // 帧数不整除半周期时，采样到的最暗帧会略高于理论下限
+        let min_alpha = (TRAY_WORKING_MIN_ALPHA * 255.0).round() as u8;
+        assert!(alphas[darkest_index] >= min_alpha);
+        assert!(alphas[darkest_index] <= min_alpha + 3);
+        assert_eq!(
+            &icons.working[darkest_index].rgba()[center..center + 3],
+            &[255, 255, 255]
+        );
+        assert_eq!(icons.working[darkest_index].rgba()[3], 0);
 
-        let alert = build_tray_icon(&base, Some(ALERT_COLOR));
-        // 画布边缘的圆环覆盖原图像素，圆环之外的四角保持不变
-        let top_center = ((0 * 20 + 10) * 4) as usize;
-        assert_eq!(&alert.rgba()[top_center..top_center + 4], &ALERT_COLOR);
-        assert_eq!(&alert.rgba()[0..4], &[255, 255, 255, 255]);
-        // 右下角实心角标同样使用状态色，16px 托盘下仍清晰可见
-        assert_eq!(&alert.rgba()[badge..badge + 4], &ALERT_COLOR);
+        // 告警帧前半周期显示完整图标，后半周期整枚透明，形成隐藏 / 显示闪烁
+        assert_eq!(icons.alert[0].rgba()[3], 255);
+        assert_eq!(icons.alert[0].rgba()[(19 * 20 + 19) * 4 + 3], 255);
+        let hidden_frame = TRAY_ALERT_FRAME_COUNT / 2;
+        for frame in 0..TRAY_ALERT_FRAME_COUNT {
+            let is_visible = frame < hidden_frame;
+            let corner_alpha = icons.alert[frame].rgba()[(19 * 20 + 19) * 4 + 3];
+            let center_alpha = icons.alert[frame].rgba()[center + 3];
+            let expected_alpha = if is_visible { 255 } else { TRAY_HIDDEN_ALPHA };
+            assert_eq!(corner_alpha, expected_alpha);
+            assert_eq!(center_alpha, expected_alpha);
+        }
+    }
+
+    #[test]
+    fn tray_badge_icon_draws_outline_and_keeps_interior_transparent() {
+        // 用透明底 + 中央不透明绿色方块模拟当前透明图标
+        let mut pixels = vec![0_u8; 32 * 32 * 4];
+        for y in 8..24 {
+            for x in 8..24 {
+                let index = ((y * 32 + x) * 4) as usize;
+                pixels[index] = 46;
+                pixels[index + 1] = 213;
+                pixels[index + 2] = 115;
+                pixels[index + 3] = 255;
+            }
+        }
+        let base = Image::new_owned(pixels, 32, 32);
+        let tray = build_tray_badge_icon(&base);
+
+        assert_eq!((tray.width(), tray.height()), (32, 32));
+        // 圆角外四角保持透明
+        assert_eq!(tray.rgba()[3], 0);
+        // 顶边中点为深绿描边
+        let border_pixel = ((16 * 32 + 1) * 4) as usize;
+        assert_eq!(
+            &tray.rgba()[border_pixel..border_pixel + 4],
+            &[4, 120, 87, 255]
+        );
+        // 描边与图形之间的内部区域不填充
+        let interior_pixel = ((4 * 32 + 16) * 4) as usize;
+        assert_eq!(tray.rgba()[interior_pixel + 3], 0);
+        // 中央图形保留原色
+        let center = ((16 * 32 + 16) * 4) as usize;
+        assert_eq!(&tray.rgba()[center..center + 4], &[46, 213, 115, 255]);
+    }
+
+    #[test]
+    fn alert_frames_alternate_between_visible_and_hidden() {
+        assert!(alert_frame_visible(0, TRAY_ALERT_FRAME_COUNT));
+        assert!(alert_frame_visible(
+            TRAY_ALERT_FRAME_COUNT / 2 - 1,
+            TRAY_ALERT_FRAME_COUNT
+        ));
+        assert!(!alert_frame_visible(
+            TRAY_ALERT_FRAME_COUNT / 2,
+            TRAY_ALERT_FRAME_COUNT
+        ));
+        assert!(!alert_frame_visible(
+            TRAY_ALERT_FRAME_COUNT - 1,
+            TRAY_ALERT_FRAME_COUNT
+        ));
+        // 帧数为奇数时隐藏段多一帧，避免显示帧数超过半个周期
+        assert!(alert_frame_visible(3, 9));
+        assert!(!alert_frame_visible(4, 9));
+    }
+
+    #[test]
+    fn tray_animation_frame_is_time_driven() {
+        assert_eq!(
+            tray_animation_frame(
+                Duration::ZERO,
+                TRAY_WORKING_FRAME_COUNT,
+                TRAY_WORKING_PERIOD
+            ),
+            0
+        );
+        assert_eq!(
+            tray_animation_frame(
+                TRAY_WORKING_PERIOD / 2,
+                TRAY_WORKING_FRAME_COUNT,
+                TRAY_WORKING_PERIOD
+            ),
+            TRAY_WORKING_FRAME_COUNT / 2
+        );
+        // 一个周期后从头播放，且始终落在有效帧范围内
+        assert_eq!(
+            tray_animation_frame(
+                TRAY_WORKING_PERIOD,
+                TRAY_WORKING_FRAME_COUNT,
+                TRAY_WORKING_PERIOD
+            ),
+            0
+        );
+        let last = tray_animation_frame(
+            TRAY_ALERT_PERIOD - Duration::from_millis(1),
+            TRAY_ALERT_FRAME_COUNT,
+            TRAY_ALERT_PERIOD,
+        );
+        assert_eq!(last, TRAY_ALERT_FRAME_COUNT - 1);
+        assert_eq!(
+            tray_animation_frame(Duration::from_secs(1), 1, TRAY_ALERT_PERIOD),
+            0
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn vscode_candidate(pid: u32, title: &str) -> WindowCandidate {
+        WindowCandidate {
+            hwnd: std::ptr::null_mut(),
+            pid,
+            title: title.to_string(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vscode_title_score_prefers_deeper_directory_segment() {
+        let directory = Path::new(r"C:\work\pinglet\src");
+
+        // 标题同时命中 pinglet 与 src 时，更深的 src 得分更高
+        let deep = vscode_title_score("main.ts - src - pinglet - Visual Studio Code", directory);
+        let shallow = vscode_title_score("README - pinglet - Visual Studio Code", directory);
+        assert!(deep > shallow);
+
+        // 忽略过短的路径段，避免盘符或单字符目录误命中
+        assert!(vscode_title_score("c - Visual Studio Code", directory).is_none());
+        assert!(vscode_title_score("其它项目 - Visual Studio Code", directory).is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn select_vscode_window_prefers_title_match_over_fallback() {
+        let directory = Path::new(r"C:\work\pinglet\src");
+        let unmatched_a = vscode_candidate(1, "未知项目 - Visual Studio Code");
+        let unmatched_b = vscode_candidate(2, "另一个项目 - Visual Studio Code");
+        let matched = vscode_candidate(3, "main.ts - src - pinglet - Visual Studio Code");
+        let candidates = [&unmatched_a, &unmatched_b, &matched];
+
+        let selected = select_vscode_window(&candidates, directory, false).expect("title match");
+        assert_eq!(selected.pid, 3);
+
+        // 唯一窗口但未命中标题：仅在允许兜底时激活
+        let unique = [&unmatched_a];
+        assert!(select_vscode_window(&unique, directory, false).is_err());
+        assert_eq!(
+            select_vscode_window(&unique, directory, true)
+                .expect("unique fallback")
+                .pid,
+            1
+        );
+
+        // 多个候选都未命中时拒绝猜测
+        let ambiguous = [&unmatched_a, &unmatched_b];
+        assert!(select_vscode_window(&ambiguous, directory, true).is_err());
+        assert!(select_vscode_window(&[], directory, true).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn select_vscode_window_prefers_deeper_directory_match() {
+        let directory = Path::new(r"C:\work\pinglet\src");
+        let workspace = vscode_candidate(1, "README - pinglet - Visual Studio Code");
+        let nested = vscode_candidate(2, "main.ts - src - pinglet - Visual Studio Code");
+        let candidates = [&workspace, &nested];
+
+        let selected = select_vscode_window(&candidates, directory, false).expect("deeper match");
+        assert_eq!(selected.pid, 2);
     }
 }

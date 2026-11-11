@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <!-- 与 index.html 顶栏 logo 同一图形与配色：信号点 + 两道波纹，寓意轻巧的探测信号 -->
-  <!-- 深色底铺满画布，图形放大约 1.3 倍并加粗，保证 16/24px 托盘尺寸下仍能看清 -->
-  <circle cx="512" cy="512" r="512" fill="#18181B" />
-  <g transform="translate(512 502) scale(1.3) translate(-512 -502)">
+  <!-- 透明底，图形放大约 1.7 倍，保证 16/24px 托盘尺寸下仍能看清，并让 Windows 托盘底色透出 -->
+  <g transform="translate(512 502) scale(1.7) translate(-512 -502)">
     <path d="M282.1 279.2A396.8 396.8 0 0 1 741.8 601.1" fill="none" stroke="#FF4D4F" stroke-width="95" stroke-linecap="round" />
     <path d="M311 443.1A230.4 230.4 0 0 1 577.9 630" fill="none" stroke="#FAAD14" stroke-width="110" stroke-linecap="round" />
     <circle cx="351" cy="670" r="110" fill="#2ED573" />

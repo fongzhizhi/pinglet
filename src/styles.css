@@ -51,6 +51,15 @@
 
   /* 面板背景不透明度（= 1 - 透明度）：设置面板滑块写入，只影响背景，文字与图标保持不透明 */
   --panel-opacity: 1;
+
+  /* 主题切换过渡时长；仅在根节点临时类 is-theme-transitioning 存在时生效 */
+  --theme-transition-duration: 600ms;
+
+  /* 面板显隐动画：收起略快于展开，scale 不低于 0.6，避免收缩时被窗口边缘裁掉 */
+  --panel-hide-duration: 160ms;
+  --panel-show-duration: 220ms;
+  --panel-hide-offset: 10px;
+  --panel-hide-scale: 0.68;
 }
 
 :root[data-font-size="small"] {
@@ -137,6 +146,33 @@ input {
 }
 
 /* ============ 面板外壳 ============ */
+
+/* 显隐动画只作用于包裹层，避免覆盖 .panel 的抖动 / 呼吸动画 */
+.panel-stage {
+  width: 100%;
+  height: 100vh;
+  transform-origin: right bottom;
+  transition:
+    transform var(--panel-show-duration) ease-out,
+    opacity var(--panel-show-duration) ease-out;
+}
+
+.panel-stage.is-panel-collapsing {
+  transition-duration: var(--panel-hide-duration);
+}
+
+.panel-stage.is-panel-collapsed {
+  /* 朝右下托盘方向收缩；translate 先于 scale，偏移量保持像素语义 */
+  transform: translate(var(--panel-hide-offset), var(--panel-hide-offset))
+    scale(var(--panel-hide-scale));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 窗口已被系统隐藏或最小化时直接落到收起态，不做过渡 */
+.panel-stage.is-panel-snap {
+  transition: none !important;
+}
 
 .panel {
   position: relative;
@@ -327,20 +363,11 @@ input {
 
 .logo {
   flex: none;
-  width: 1.5em;
-  height: 1.5em;
+  width: 1.15em;
+  height: 1.15em;
 }
 
-/* 三层图形各自映射状态：默认保留状态色但降低透明度，激活后完全点亮；只有过渡，没有动画 */
-.logo-part {
-  opacity: 0.5;
-  transition: opacity 0.3s ease;
-}
-
-.logo-part.active {
-  opacity: 1;
-}
-
+/* 三层图形常亮：颜色始终表达当前会话状态的组合 */
 #logo-pending {
   stroke: var(--color-state-pending);
 }
@@ -968,6 +995,7 @@ input {
 .transparency-slider:focus-visible,
 .reset-btn:focus-visible,
 .quit-btn:focus-visible,
+.restore-hidden-btn:focus-visible,
 .settings-back-btn:focus-visible {
   outline: 1px solid var(--color-focus);
   outline-offset: 1px;
@@ -1170,6 +1198,33 @@ input {
   color: var(--color-state-pending);
 }
 
+.restore-hidden-btn {
+  width: 100%;
+  height: calc(var(--font-size-base) * 2.1);
+  margin-top: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-sub);
+  font-size: calc(var(--font-size-base) * 0.88);
+  cursor: pointer;
+  transition:
+    border-color 0.14s ease,
+    color 0.14s ease,
+    background-color 0.14s ease;
+}
+
+.restore-hidden-btn:hover:not(:disabled) {
+  border-color: var(--color-focus);
+  background: var(--color-chip-bg);
+  color: var(--color-text-main);
+}
+
+.restore-hidden-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ============ 悬浮提示 ============ */
 
 .tooltip {
@@ -1216,6 +1271,38 @@ input {
 
 .logo-tooltip {
   min-width: 132px;
+}
+
+/* ============ 会话行右键菜单 ============ */
+
+.row-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-settings-bg);
+  box-shadow: 0 10px 30px var(--color-shadow);
+}
+
+.row-menu-item {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-main);
+  font-size: calc(var(--font-size-base) * 0.88);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.row-menu-item:hover,
+.row-menu-item:focus-visible {
+  background: var(--color-surface-hover);
+  outline: none;
 }
 
 .tooltip-status {
@@ -1316,6 +1403,37 @@ body.browser-preview::before {
 
 :root[data-theme="light"] body.browser-preview::before {
   color: rgba(0, 0, 0, 0.42);
+}
+
+/* ============ 主题切换过渡 ============ */
+
+/* 只在主题真正变化时由 settings.ts 临时挂类；transitions 不常驻，避免影响其它交互动画 */
+@media (prefers-reduced-motion: no-preference) {
+  :root.is-theme-transitioning,
+  :root.is-theme-transitioning *,
+  :root.is-theme-transitioning *::before,
+  :root.is-theme-transitioning *::after {
+    transition-property:
+      background-color, border-color, color, fill, stroke, box-shadow, outline-color;
+    transition-duration: var(--theme-transition-duration);
+    transition-timing-function: ease;
+  }
+
+  :root.is-theme-transitioning .session-list::-webkit-scrollbar-thumb,
+  :root.is-theme-transitioning .settings-panel::-webkit-scrollbar-thumb {
+    transition: background-color var(--theme-transition-duration) ease;
+  }
+
+  /* 面板显隐动画独立于主题过渡：保留 transform / opacity 与各自时长 */
+  :root.is-theme-transitioning .panel-stage {
+    transition-property: transform, opacity;
+    transition-duration: var(--panel-show-duration);
+    transition-timing-function: ease-out;
+  }
+
+  :root.is-theme-transitioning .panel-stage.is-panel-collapsing {
+    transition-duration: var(--panel-hide-duration);
+  }
 }
 
 /* ============ 减少动态效果 ============ */

@@ -1,6 +1,6 @@
 [package]
 name = "pinglet"
-version = "1.4.0"
+version = "1.4.1"
 description = "Claude Code 会话状态看板"
 authors = ["fongzhizhi"]
 edition = "2024"
