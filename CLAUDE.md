@@ -30,10 +30,10 @@ Pinglet 是 Tauri 2 + 原生 TypeScript（无 React/Vue、无 CSS 框架）的 W
 - 产物：安装包 `src-tauri/target/release/bundle/nsis/Pinglet_<version>_x64-setup.exe`，便携版 `src-tauri/target/release/pinglet.exe`。
 - 前置依赖：Rust MSVC 工具链（`rust-toolchain.toml` 固定 1.99.1 与 clippy / rustfmt 组件）、Node 22（`.nvmrc`）、Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK、WebView2 Runtime。
 - 浏览器预览在非 Tauri 环境自动加载 `src/mock-sessions.ts`；`http://localhost:1420/?settings=1` 可直接打开设置面板。
-- 前端工具链：`eslint.config.js` + `.prettierrc.json` + `vitest.config.ts`；纯逻辑测试在 `src/session-state.test.ts`、`src/settings-schema.test.ts`、`src/auto-theme.test.ts`、`src/window-animation.test.ts`（`environment: "node"`；auto-theme 用 `vi.mock` 隔离 `settings` / `system` 的 DOM 副作用）。`npm run build` 里的 `tsc` 仍是唯一的前端类型检查。
+- 前端工具链：`eslint.config.js` + `.prettierrc.json` + `vitest.config.ts`；纯逻辑测试在 `src/session-state.test.ts`、`src/settings-schema.test.ts`、`src/auto-theme.test.ts`、`src/window-animation.test.ts`、`src/folder-colors.test.ts`、`src/reminder-state.test.ts`、`src/heartbeat.test.ts`、`src/window-size.test.ts`（`environment: "node"`；auto-theme 用 `vi.mock` 隔离 `settings` / `system` 的 DOM 副作用）。`npm run build` 里的 `tsc` 仍是唯一的前端类型检查。
 - NOTE: 从 Git Bash 以小写盘符路径（如 `d:\…`）启动时，Vitest 5 可能因 ESM 路径盘符大小写不一致报 `Cannot read properties of undefined (reading 'config')`；用 `cd D:/…` 切到大写盘符后再运行即可，与代码无关。
-- Rust 测试位于 `src-tauri/src/lib.rs` 末尾的 `#[cfg(test)] mod tests`（覆盖标题解析、边缘吸附、状态分类、托盘 tooltip / 通知弹窗内容与定位、亮度中位数、托盘动画帧与 VSCode 窗口选择）。
-- CI 配置在 `.github/workflows/ci.yml`：Windows runner 上依次执行版本号校验、lint、format check、Vitest、前端构建、`cargo fmt --check`、`cargo clippy -- -D warnings` 与 `cargo test`；`release.yml` 先跑同名 `verify` job，标签触发时校验标签与版本一致，产物附带 `SHA256SUMS.txt`；依赖更新由 Dependabot 每周检查。release 流程见 `docs/build.md`。
+- Rust 测试分散在各职责模块末尾的 `#[cfg(test)] mod tests`（覆盖标题解析与缓存裁剪、边缘吸附、状态分类与告警去重键、托盘 tooltip / 动画帧、通知弹窗内容与定位、亮度中位数、VSCode 窗口选择）。
+- CI 配置在 `.github/workflows/ci.yml`：Windows runner 上依次执行版本号校验、lint、format check、Vitest、前端构建、`cargo fmt --check`、`cargo clippy -- -D warnings` 与 `cargo test`；`release.yml` 先跑同名 `verify` job，标签触发时校验标签与版本一致、`CHANGELOG.md` 含对应版本小节，产物附带 `SHA256SUMS.txt`，发布说明从 CHANGELOG 对应小节提取；依赖更新由 Dependabot 每周检查。release 流程见 `docs/build.md`。
 
 ## 架构总览
 
@@ -55,7 +55,11 @@ Pinglet 是 Tauri 2 + 原生 TypeScript（无 React/Vue、无 CSS 框架）的 W
 
 ### 前端模块
 
-- `src/main.ts` — 入口与所有交互：轮询、行渲染、汇总胶囊（计数签名差量更新）、logo（常亮）、心跳（tooltip 可见时才写文本）、提醒（呼吸灯 / 音效 / 抖动 / 免打扰门控）、tooltip、错误条、窗口自动高度、缩放热区、设置面板开关、已完成会话右键「临时隐藏」（仅内存，按 key + 状态快照清理）、面板显隐动画状态机接线、自动主题与窗口显隐事件。文件较大，改动尽量局部化。
+- `src/main.ts` — 入口与所有交互：轮询、行渲染、汇总胶囊（计数签名差量更新）、logo（常亮）、心跳（tooltip 可见时才写文本）、提醒（呼吸灯 / 音效 / 抖动 / 免打扰门控）、tooltip、错误条、窗口自动高度、缩放热区、设置面板开关、已完成会话右键「临时隐藏」（仅内存，按 key + 状态快照清理）、面板显隐动画状态机接线、自动主题与窗口显隐事件。文件较大，改动尽量局部化；纯逻辑已抽到下列模块。
+- `src/folder-colors.ts` — 目录标签配色纯函数：路径归一为稳定配色键（去尾部分隔符、小写），FNV-1a 哈希 + 线性探测分配色板槽位（沿用上一轮分配，超过 8 色允许复用）。
+- `src/reminder-state.ts` — 提醒判定纯函数：`detectReminderEvent(rows, previousStates, hasRenderedSessions)` 返回本轮提醒事件与下一轮状态表；首轮只播种，异常优先于完成，待处理压过已中断。
+- `src/heartbeat.ts` — 心跳等级纯判定：无成功刷新或超过 15 秒为 `offline`，超过 5 秒为 `warn`，其余 `ok`。
+- `src/window-size.ts` — 窗口尺寸契约：宽 280–600、高 200–800 的上下限、按屏幕可用高度裁剪，`normalizeStoredWindowSize` 解析并校验尺寸存档（拒绝非有限数值）。
 - `src/settings-schema.ts` — 无 DOM / localStorage 依赖的设置契约与纯解析：`parseSettings`、`normalizeShortcut`、`normalizePanelTransparency`、默认值，供 `settings.ts` 与 Vitest 共用。
 - `src/settings.ts` — 设置单例 + 订阅；持久化键 `pinglet.settings.v1`；区分离散的用户主题模式与生效主题（`getEffectiveTheme` / `setEffectiveTheme`）；`applyTheme` / `applyFontSize` / `applyPanelTransparency` / `applyPanelEffects` 只改根节点 dataset 与 CSS 变量，不经过 Rust。`applyTheme` 用 `appliedTheme` 守卫，只有主题真正变化且页面可见、未开启 reduce-motion 时才临时加 `is-theme-transitioning`（CSS 过渡 600ms，约 640ms 后移除），首次加载与非主题设置变更不加类；`setThemeTransitionEnabled` 由 main.ts 初始化后开启，通知页不开启。`panelEffects`（异常行呼吸灯 / 进行中行流光）默认开启，写入根节点 `data-alert-pulse` / `data-working-flow` 供 CSS 开关动效。
 - `src/auto-theme.ts` — 自动主题控制器：`resolveAutoTheme` 纯判定（≥0.65 暗色 / ≤0.35 亮色 / 灰区保持）+ 开启自动 / 移动结束 / 重新可见时 400ms 防抖后立即采样应用；周期采样每 10 秒、连续 2 次一致、10 秒最小切换间隔。
@@ -66,8 +70,9 @@ Pinglet 是 Tauri 2 + 原生 TypeScript（无 React/Vue、无 CSS 框架）的 W
 - `src/mock-sessions.ts` — 仅 dev + 非 Tauri 的模拟数据（四态、未知状态兜底、死进程残留）。
 - `notification.html` / `src/notification.ts` / `src/notification.css` — 右下角自绘通知弹窗的独立 Vite 入口；每次显示前调用 `reloadSettingsFromStorage()` 重读设置（自动主题读取 `settings.ts` 持久化的生效结果 `pinglet.effective-theme.v1`，本页不运行采样），启动时 `invoke("get_notification_payload")` 拉取内容，按内容实测高度调用 `resize_notification_window`；停留 5 秒后淡出并调用 `hide_notification_window`，点击卡片调用 `open_main_window`，× 立即隐藏。`vite.config.ts` 的 `build.rollupOptions.input` 同时声明 `index.html` 与 `notification.html`。
 
-### Rust 后端（`src-tauri/src/lib.rs`）
+### Rust 后端（`src-tauri/src/`）
 
+- 模块布局：`lib.rs` 只保留 crate 文档、模块声明、共享常量、`AppState` 与 `run()`；`session.rs`（采集与四态）、`title.rs`（transcript 标题与缓存）、`tray.rs`（托盘图标 / 菜单 / tooltip）、`notify.rs`（通知弹窗）、`window.rs`（显隐 / 吸附 / 穿透 / 亮度采样）、`activation.rs`（VSCode / CLI 激活）、`settings.rs`（系统设置类命令）、`monitor.rs`（后台会话监控）。新增命令在对应模块实现，并以 `模块::命令` 路径注册到 `generate_handler!`。
 - 命令：`list_sessions`、`activate_session`、`quit_app`、`set_close_to_tray`、`set_click_through`、`is_autostart_enabled`、`set_autostart`、`set_global_shortcut`、`set_notification_preferences`、`show_test_notification`、`get_notification_payload`、`hide_notification_window`、`open_main_window`、`hide_main_window_now`、`resize_notification_window`、`reset_window_position`、`sample_backdrop_luminance`。`src-tauri/src/main.rs` 只是 `pinglet_lib::run()` 的薄入口。
 - `AppState` 持有 `close_to_tray` / `click_through` / `tray_ready` / 托盘勾选项 / 当前快捷键 / 吸附边缘状态，以及通知偏好（`system_notifications` / `do_not_disturb`）、待渲染的通知弹窗 payload 与自动隐藏线程的 generation 计数、窗口隐藏动画代号 `window_hide_generation`、托盘未读标志、窗口活跃标志、`TrayRuntime`、预生成的 `TrayIcons` 与监控线程停止标志。
 - 插件注册顺序：`tauri-plugin-single-instance` 必须第一个；随后 autostart、global-shortcut。window-state 只启用 `StateFlags::POSITION`，存档为 `app_config_dir()/.window-state.json`，并用 `with_denylist` 排除通知弹窗；setup 中无存档才定位主屏右上角，有存档则 `clamp_window_into_work_area`。
@@ -107,7 +112,7 @@ Pinglet 是 Tauri 2 + 原生 TypeScript（无 React/Vue、无 CSS 框架）的 W
 
 - 版本号三处必须同步：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`。Vite 用 `package.json` 的版本注入 `__APP_VERSION__`，设置面板「关于」区展示它。
 - 图标唯一源文件 `assets/app-icon.svg`（透明背景，图形 `scale(1.7)`）；`index.html` 顶栏内联 SVG 必须与其几何一致；`npx tauri icon` 生成后只保留 `bundle.icon` 引用的 5 个文件，生成物不要手改。托盘专用描边底图由 Rust 在运行时基于该图标合成，不新增图标素材。
-- 用户文档：`docs/usage.md`（交互与窗口行为）、`docs/build.md`（构建与打包）；设计定稿：`docs/plans/pinglet-v1.2.md`、`docs/plans/pinglet-v1.3.md`、`docs/plans/pinglet-v1.4.md`、`docs/plans/pinglet-v1.4.1.md`（含实现状态与偏差）；标题数据源与实现说明：`docs/session-title-source.md`；背景与实现过程：`docs/plans/pinglet.md`。
+- 用户文档：`docs/usage.md`（交互与窗口行为）、`docs/build.md`（构建与打包）；设计文档索引：`docs/plans/README.md`（各版本设计稿与实现状态）；变更日志：`CHANGELOG.md`（Release 发布说明从此提取）；标题数据源与实现说明：`docs/session-title-source.md`；优化待办：`docs/optimization-backlog.md`。
 
 ## 修改时的硬约束
 

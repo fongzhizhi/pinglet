@@ -7,6 +7,8 @@
 > 2026-11-10：托盘状态图标、自动主题、告警弹窗及配套改进（单实例保护、免打扰、窗口位置记忆、托盘 tooltip、差量更新）的调研与实施计划见 [plans/pinglet-v1.4.md](plans/pinglet-v1.4.md)。
 >
 > 2026-11-12：完成工程护栏与发布质量收尾（Clippy、版本校验、安装包元数据、Dependabot、固定工具链、Release 校验与校验和）。
+>
+> 2026-11-12：完成模块化第一阶段（Rust `lib.rs` 拆分、前端纯逻辑抽取）、标题缓存裁剪、截图压缩，并接入 CHANGELOG 发布说明。
 
 ## 优先项
 
@@ -27,6 +29,7 @@
 - [ ] **P2 补测试，优先隐私契约**
   - 前端：把 `src/settings.ts` 的 `parseSettings` / `parseReminders` / `normalizePanelTransparency` 抽成纯函数模块，补损坏 JSON、字段类型错误、范围裁剪、提醒组合等测试。
     - v1.4 已完成：纯逻辑迁至 `src/settings-schema.ts`，`src/settings-schema.test.ts` 覆盖空存储、自动主题、通知字段、类型回退、损坏 JSON 与快捷键截断；其余分支继续补。
+    - 2026-11-12 已完成：目录配色、提醒判定、心跳等级、窗口尺寸迁至独立模块并由 Vitest 覆盖；`main.ts` 剩余部分仍以 DOM 与窗口行为为主。
   - Rust：把 session 文件解析抽成 `parse_session(&str)` / `read_session_file(path)`，补白名单字段、未知字段忽略、非交互 `kind` 跳过、错误信息不含 JSON、transcript 未命中负缓存等测试。
   - 验收：`npm test` 与 `cargo test` 覆盖上述分支；不引入 DOM 测试框架。
 
@@ -46,8 +49,12 @@
 
 ## 可选/长期
 
-- [ ] 拆分大文件：`src/main.ts`（约 1308 行）、`src-tauri/src/lib.rs`（约 1531 行）、`src/settings-panel.ts`（约 512 行）；建议按 `board/reminders/window`、`sessions/titles/tray` 拆开。
-- [ ] `TITLE_CACHE` 按当前 `sessionId` 集合 prune，避免长期运行只增不减。
-- [ ] 压缩 `docs/images/screenshot.png`（约 806 KB），缩短 README 首屏加载时间。
+- [x] **拆分 Rust `lib.rs`**（2026-11-12）
+  - 完成：拆为 `activation` / `monitor` / `notify` / `session` / `settings` / `title` / `tray` / `window` 模块，`lib.rs` 仅保留 crate 文档、模块声明、共享常量、`AppState` 与 `run()`；测试随代码迁移。
+- [ ] 继续拆分前端大文件：`src/main.ts`（约 1739 行，已抽出纯逻辑，剩余以 DOM / 窗口行为为主）、`src/settings-panel.ts`（约 512 行）；建议按 `board/reminders/window`、`system/general` 继续拆开。
+- [x] **`TITLE_CACHE` 按当前 `sessionId` 集合 prune**（2026-11-12）
+  - 完成：新增 `prune_title_cache`，每轮采集在成功读取会话目录后调用，同时裁剪标题缓存与 transcript 未命中缓存。
+- [x] **压缩 `docs/images/screenshot.png`**（2026-11-12）
+  - 完成：无损重编码，806 KB → 35 KB。
 - [ ] 代码签名：公开分发需要证书与 CI secrets；未签名前保留 SmartScreen 已知限制说明。
 - [ ] GitHub 网页设置：仓库描述、topics、首个 Release、分支保护（代码之外，手动完成）。

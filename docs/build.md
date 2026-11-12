@@ -78,18 +78,21 @@ Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板�
 
 `npm run check:versions` 会校验三处版本一致且符合 semver；`node scripts/check-versions.mjs --tag v1.4.1` 额外校验发布标签与版本匹配。CI 与 Release 工作流都会执行该检查。
 
+发版前还需在 `CHANGELOG.md` 增加与版本号一致的 `## [<version>]` 小节；Release 的 `verify` job 会校验该小节存在，构建完成后用它自动填充草稿 Release 的发布说明。
+
 ## CI 与发布
 
 - `.github/workflows/ci.yml`：推送到 `master`、提交 PR 或手动触发时，在 `windows-latest` 上执行版本号校验、ESLint、Prettier 校验、Vitest、前端构建、`cargo fmt --check`、`cargo clippy -- -D warnings` 与 `cargo test`。先构建前端再跑 Rust 测试，因为 `generate_context!` 需要 `dist/`。
-- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时，先由 `verify` job 重复完整检查（标签触发时校验标签与版本号一致），通过后再构建 NSIS 安装包并创建**草稿** Release，同时上传 `Pinglet_<version>_x64-portable.zip`（内含 `pinglet.exe`）和 `SHA256SUMS.txt`。检查草稿内容后再手动发布。
+- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时，先由 `verify` job 重复完整检查（标签触发时校验标签与版本号一致、`CHANGELOG.md` 含对应版本小节），通过后再构建 NSIS 安装包并创建**草稿** Release，用 CHANGELOG 对应小节覆盖发布说明，同时上传 `Pinglet_<version>_x64-portable.zip`（内含 `pinglet.exe`）和 `SHA256SUMS.txt`。检查草稿内容后再手动发布。
 - `.github/dependabot.yml`：npm、cargo 与 GitHub Actions 依赖每周一检查更新，minor/patch 归组为单个 PR。
 
 发布新版本：
 
 1. 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号，运行 `npm run check:versions` 确认一致。
-2. 提交并推送 `master`，确认 CI 通过。
-3. 打标签并推送：`git tag v1.4.1`、`git push origin v1.4.1`。
-4. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的安装包、便携版与 `SHA256SUMS.txt` 后发布。
+2. 在 `CHANGELOG.md` 增加 `## [<version>]` 小节，整理本版变更。
+3. 提交并推送 `master`，确认 CI 通过。
+4. 打标签并推送：`git tag v1.4.1`、`git push origin v1.4.1`。
+5. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的发布说明、安装包、便携版与 `SHA256SUMS.txt` 后发布。
 
 > 如果目标版本的标签已存在，先递增版本号（例如 `1.4.1`）并同步三处版本，再打新标签；不要重复推送同一个标签。
 
@@ -99,7 +102,7 @@ Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板�
 
 1. 打开 <https://github.com/fongzhizhi/pinglet/releases>，找到对应版本的草稿。
 2. 确认 Assets 包含 `Pinglet_<version>_x64-setup.exe`、`Pinglet_<version>_x64-portable.zip` 与 `SHA256SUMS.txt`。
-3. 按需补充发布说明，点击 **Publish release**。
+3. 核对自动填充的发布说明（来自 `CHANGELOG.md`），按需补充后点击 **Publish release**。
 
 如果要手动上传本地构建的安装包：
 

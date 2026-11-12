@@ -33,6 +33,7 @@ Pinglet 把本机所有活跃的 Claude Code 交互式会话聚合成一个小�
 - 系统要求：Windows 10 / 11（需要 WebView2 Runtime，Windows 11 已内置）
 - 安装包：`Pinglet_<version>_x64-setup.exe`
 - 便携版：从 Release 下载 `Pinglet_<version>_x64-portable.zip`，解压后直接运行；也可自行构建 `src-tauri/target/release/pinglet.exe`
+- Release 同时提供 `SHA256SUMS.txt`，可用于校验下载文件的完整性
 
 首次启动后窗口出现在屏幕右上角，默认始终置顶。
 
@@ -99,7 +100,8 @@ docs/                使用说明、构建说明与设计文档
 
 - [使用说明](docs/usage.md)：界面、交互、设置与窗口行为
 - [构建与打包](docs/build.md)：环境准备、NSIS 打包、图标生成
-- [设计定稿 v1.4.1](docs/plans/pinglet-v1.4.1.md) / [v1.4](docs/plans/pinglet-v1.4.md) / [v1.3](docs/plans/pinglet-v1.3.md) / [v1.2](docs/plans/pinglet-v1.2.md)
+- [设计文档索引](docs/plans/README.md)：各版本设计稿、实现状态与验收记录
+- [变更日志](CHANGELOG.md)：版本变更与发布说明
 - [会话标题数据源说明](docs/session-title-source.md)
 - [开发约定](CLAUDE.md)
 
