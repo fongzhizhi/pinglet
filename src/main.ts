@@ -3,6 +3,9 @@
  * Pinglet 看板前端入口：轮询 Rust 侧的 list_sessions，并按四态渲染、提醒与窗口行为。
  */
 import { scheduleAutoThemeSample, startAutoTheme, stopAutoTheme } from "./auto-theme";
+import { assignFolderColorSlots, folderColorKey, folderTagColor } from "./folder-colors";
+import { resolveHeartbeatLevel, type HeartbeatLevel } from "./heartbeat";
+import { detectReminderEvent, type AbnormalState } from "./reminder-state";
 import {
   BOARD_STATES,
   STATE_META,
@@ -64,18 +67,19 @@ import {
   markPanelHidden,
   markPanelShown,
 } from "./window-animation";
+import {
+  DEFAULT_WINDOW_HEIGHT,
+  DEFAULT_WINDOW_WIDTH,
+  WINDOW_MIN_HEIGHT,
+  clampWindowHeight,
+  clampWindowWidth,
+  maxWindowHeight,
+  normalizeStoredWindowSize,
+  type StoredWindowSize,
+} from "./window-size";
 
 const REFRESH_INTERVAL_MS = 2000;
 const HEARTBEAT_INTERVAL_MS = 1000;
-const HEARTBEAT_WARN_MS = 5000;
-const HEARTBEAT_OFFLINE_MS = 15000;
-const WINDOW_MIN_WIDTH = 280;
-const WINDOW_MAX_WIDTH = 600;
-const WINDOW_MIN_HEIGHT = 200;
-const WINDOW_MAX_HEIGHT = 800;
-// 默认宽度略宽于最小值，避免目录标签与标题过度截断；高度上限约 5 行会话，超出后列表内部滚动
-const DEFAULT_WINDOW_WIDTH = 320;
-const DEFAULT_WINDOW_HEIGHT = 320;
 // v2：默认宽度由 280 调整为 320，换键让旧存档不再覆盖新默认宽度
 const WINDOW_SIZE_STORAGE_KEY = "pinglet.window.v2";
 const WINDOW_SIZE_SAVE_DELAY_MS = 350;
@@ -116,13 +120,6 @@ const PREFERS_REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 const STATE_CLASSES = BOARD_STATES.map((state) => STATE_META[state].className);
 
-// 目录标签色板槽位数，与 styles.css 的 --color-tag-0..7 一一对应
-const FOLDER_TAG_COLOR_COUNT = 8;
-// FNV-1a 哈希常量，用于让同一目录稳定落到同一个色板起点
-const FNV_OFFSET_BASIS = 0x811c9dc5;
-const FNV_PRIME = 0x01000193;
-const UNKNOWN_FOLDER_KEY = "未知目录";
-const UNKNOWN_TAG_COLOR = "var(--color-text-sub)";
 // 第二行右侧的入口图标：VSCode 蓝 / 终端红用于区分入口，入口文字仍在悬浮详情中展示
 const VSCODE_ICON_SVG =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>';
@@ -140,11 +137,6 @@ const RESIZE_DIRECTIONS: ReadonlySet<ResizeDirection> = new Set([
   "SouthWest",
   "West",
 ]);
-
-type StoredWindowSize = {
-  width: number;
-  height: number;
-};
 
 const STATE_COLOR_VARS: Readonly<Record<BoardState, string>> = {
   blocked: "--color-state-pending",
@@ -164,12 +156,6 @@ type RowView = {
 };
 
 type BreathingKind = "alert" | "completion";
-
-type AbnormalState = Extract<BoardState, "blocked" | "interrupted">;
-
-type ReminderEvent = { kind: "alert"; state: AbnormalState } | { kind: "completion" };
-
-type HeartbeatLevel = "ok" | "warn" | "offline";
 
 if (!IS_TAURI) {
   document.body.classList.add("browser-preview");
@@ -211,7 +197,10 @@ let lastSummarySignature = "";
 
 const storedWindowSize = readStoredWindowSize();
 let preferredWindowWidth = clampWindowWidth(storedWindowSize?.width ?? DEFAULT_WINDOW_WIDTH);
-let preferredWindowHeight = clampWindowHeight(storedWindowSize?.height ?? DEFAULT_WINDOW_HEIGHT);
+let preferredWindowHeight = clampWindowHeight(
+  storedWindowSize?.height ?? DEFAULT_WINDOW_HEIGHT,
+  getMaxWindowHeight(),
+);
 let lastAppliedWindowWidth = preferredWindowWidth;
 let lastAppliedWindowHeight = Math.max(WINDOW_MIN_HEIGHT, window.innerHeight);
 let lastUserResizeAt = 0;
@@ -259,64 +248,6 @@ function requireElement<T extends Element>(selector: string): T {
     throw new Error(`缺少 DOM 节点: ${selector}`);
   }
   return element;
-}
-
-/** 目录标签配色键：同一路径稳定同色，未知目录统一兜底色。 */
-function folderColorKey(cwd: string | null): string {
-  const path = cwd?.trim().replace(/[\\/]+$/, "");
-  return path ? path.toLowerCase() : UNKNOWN_FOLDER_KEY;
-}
-
-/** FNV-1a 32 位哈希，避免随机数导致每次刷新目录变色。 */
-function hashString(value: string): number {
-  let hash = FNV_OFFSET_BASIS;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, FNV_PRIME);
-  }
-  return hash >>> 0;
-}
-
-/**
- * 为当前可见目录分配色板槽位：沿用已有分配，新目录从哈希位置线性探测空槽。
- * 目录数超过色板容量时允许复用，避免无限扩张。
- */
-function assignFolderColorSlots(keys: string[]): Map<string, number> {
-  const uniqueKeys = [...new Set(keys)];
-  const next = new Map<string, number>();
-  const usedSlots = new Set<number>();
-
-  for (const key of uniqueKeys) {
-    const slot = folderColorSlots.get(key);
-    if (slot !== undefined) {
-      next.set(key, slot);
-      usedSlots.add(slot);
-    }
-  }
-
-  for (const key of uniqueKeys) {
-    if (next.has(key)) {
-      continue;
-    }
-    let slot = hashString(key) % FOLDER_TAG_COLOR_COUNT;
-    const startSlot = slot;
-    while (usedSlots.has(slot)) {
-      slot = (slot + 1) % FOLDER_TAG_COLOR_COUNT;
-      if (slot === startSlot) {
-        break;
-      }
-    }
-    usedSlots.add(slot);
-    next.set(key, slot);
-  }
-
-  folderColorSlots = next;
-  return next;
-}
-
-function folderTagColor(key: string, slots: Map<string, number>): string {
-  const slot = slots.get(key);
-  return slot === undefined ? UNKNOWN_TAG_COLOR : `var(--color-tag-${slot})`;
 }
 
 function createRowView(): RowView {
@@ -486,7 +417,10 @@ function renderRows(rows: SessionRow[]): void {
   const now = Date.now();
   const sortedRows = sortRows(visibleRows);
   const desiredKeys = new Set(sortedRows.map((row) => getRowKey(row)));
-  const folderColors = assignFolderColorSlots(sortedRows.map((row) => folderColorKey(row.cwd)));
+  folderColorSlots = assignFolderColorSlots(
+    sortedRows.map((row) => folderColorKey(row.cwd)),
+    folderColorSlots,
+  );
 
   for (const [key, view] of rowViews) {
     if (desiredKeys.has(key)) {
@@ -511,7 +445,7 @@ function renderRows(rows: SessionRow[]): void {
       rowViews.set(key, view);
     }
     rowsByKey.set(key, row);
-    updateRowView(view, row, classify(row), now, folderColors);
+    updateRowView(view, row, classify(row), now, folderColorSlots);
   }
 
   const currentOrder = [...listElement.children]
@@ -551,7 +485,13 @@ function renderRows(rows: SessionRow[]): void {
   renderSummary(blockedCount, interruptedCount, workingCount);
   hiddenCountListener?.(hiddenSessions.size);
 
-  const reminderEvent = detectStateChange(sortedRows);
+  const { event: reminderEvent, nextStates } = detectReminderEvent(
+    sortedRows,
+    previousStates,
+    hasRenderedSessions,
+  );
+  previousStates = nextStates;
+  hasRenderedSessions = true;
   if (reminderEvent !== null) {
     if (reminderEvent.kind === "alert") {
       triggerAlertReminder(reminderEvent.state);
@@ -672,60 +612,6 @@ function renderSummary(blockedCount: number, interruptedCount: number, workingCo
     chip.textContent = `${workingCount} ${STATE_META.working.label}`;
     summaryElement.append(chip);
   }
-}
-
-function detectStateChange(rows: SessionRow[]): ReminderEvent | null {
-  const nextStates = new Map<string, BoardState>();
-  let alertState: AbnormalState | null = null;
-  let hasCompletion = false;
-
-  for (const row of rows) {
-    const key = getRowKey(row);
-    const state = classify(row);
-    nextStates.set(key, state);
-
-    const previous = previousStates.get(key);
-    if (previous === undefined) {
-      // 启动时已存在的会话不补闪；后续新出现的异常会话仍要提醒
-      if (hasRenderedSessions && isAbnormalState(state)) {
-        alertState = pickHigherPriority(alertState, state);
-      }
-      continue;
-    }
-
-    if (previous === state) {
-      continue;
-    }
-
-    if (isAbnormalState(state)) {
-      alertState = pickHigherPriority(alertState, state);
-    } else if (previous === "working" && state === "done") {
-      hasCompletion = true;
-    }
-  }
-
-  previousStates = nextStates;
-  hasRenderedSessions = true;
-
-  // 同一次轮询里异常优先，完成提示让位
-  if (alertState !== null) {
-    return { kind: "alert", state: alertState };
-  }
-  return hasCompletion ? { kind: "completion" } : null;
-}
-
-function isAbnormalState(state: BoardState): state is AbnormalState {
-  return state === "blocked" || state === "interrupted";
-}
-
-function pickHigherPriority(
-  current: AbnormalState | null,
-  candidate: AbnormalState,
-): AbnormalState {
-  if (current === null) {
-    return candidate;
-  }
-  return STATE_META[candidate].priority < STATE_META[current].priority ? candidate : current;
 }
 
 function setAlertColor(state: BoardState): void {
@@ -1079,19 +965,7 @@ function formatClockTime(timestamp: number): string {
 
 /** 心跳每秒计算一次；tooltip 收起时只写等级，避免每秒重写文本节点与辅助属性。 */
 function updateHeartbeat(force = false): void {
-  const age =
-    lastSuccessfulRefreshAt === null
-      ? Number.POSITIVE_INFINITY
-      : Date.now() - lastSuccessfulRefreshAt;
-
-  let level: HeartbeatLevel;
-  if (age > HEARTBEAT_OFFLINE_MS) {
-    level = "offline";
-  } else if (age > HEARTBEAT_WARN_MS) {
-    level = "warn";
-  } else {
-    level = "ok";
-  }
+  const level = resolveHeartbeatLevel(lastSuccessfulRefreshAt, Date.now());
 
   if (level !== lastHeartbeatLevel) {
     lastHeartbeatLevel = level;
@@ -1112,19 +986,8 @@ function updateHeartbeat(force = false): void {
   heartbeatTextElement.textContent = text;
 }
 
-function clampWindowWidth(width: number): number {
-  return Math.min(WINDOW_MAX_WIDTH, Math.max(WINDOW_MIN_WIDTH, Math.round(width)));
-}
-
 function getMaxWindowHeight(): number {
-  return Math.max(
-    WINDOW_MIN_HEIGHT,
-    Math.min(WINDOW_MAX_HEIGHT, Math.round(window.screen.availHeight)),
-  );
-}
-
-function clampWindowHeight(height: number): number {
-  return Math.min(getMaxWindowHeight(), Math.max(WINDOW_MIN_HEIGHT, Math.round(height)));
+  return maxWindowHeight(window.screen.availHeight);
 }
 
 function readStoredWindowSize(): StoredWindowSize | null {
@@ -1134,14 +997,7 @@ function readStoredWindowSize(): StoredWindowSize | null {
       return null;
     }
     const value: unknown = JSON.parse(raw);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return null;
-    }
-    const record = value as Record<string, unknown>;
-    if (typeof record.width !== "number" || typeof record.height !== "number") {
-      return null;
-    }
-    return { width: record.width, height: record.height };
+    return normalizeStoredWindowSize(value);
   } catch (error) {
     console.warn("pinglet: 读取窗口尺寸失败", error);
     return null;
@@ -1203,7 +1059,7 @@ function handleWindowResized(physicalWidth: number, physicalHeight: number): voi
     preferredWindowWidth = clampWindowWidth(width);
   }
   if (heightChanged) {
-    preferredWindowHeight = clampWindowHeight(height);
+    preferredWindowHeight = clampWindowHeight(height, getMaxWindowHeight());
   }
   saveWindowSizeSoon();
 
@@ -1252,7 +1108,10 @@ function setupResizeHandles(): void {
 
 async function applyInitialWindowSize(): Promise<void> {
   const currentHeight = Math.max(WINDOW_MIN_HEIGHT, window.innerHeight);
-  const height = clampWindowHeight(Math.min(currentHeight, preferredWindowHeight));
+  const height = clampWindowHeight(
+    Math.min(currentHeight, preferredWindowHeight),
+    getMaxWindowHeight(),
+  );
   await applyWindowSize(preferredWindowWidth, height);
 
   try {
@@ -1435,7 +1294,7 @@ async function resizeWindowToContent(force = false): Promise<void> {
   const contentHeight = isSettingsOpen ? measureSettingsHeight() : measureContentHeight();
   // 用户拖拽的高度是可撑开的上限，内容不足时仍收缩到内容高度
   const maxHeight = Math.min(preferredWindowHeight, getMaxWindowHeight());
-  const desiredHeight = clampWindowHeight(Math.min(contentHeight, maxHeight));
+  const desiredHeight = clampWindowHeight(Math.min(contentHeight, maxHeight), getMaxWindowHeight());
 
   // lastApplied* 只记录程序设置的尺寸，用户拖拽不会更新它；
   // 因此这里必须和窗口实际尺寸比较，否则拖高后会被误判为“已到位”而不收缩
@@ -1577,10 +1436,10 @@ async function resetAllSettings(): Promise<void> {
   }
 
   preferredWindowWidth = DEFAULT_WINDOW_WIDTH;
-  preferredWindowHeight = clampWindowHeight(DEFAULT_WINDOW_HEIGHT);
+  preferredWindowHeight = clampWindowHeight(DEFAULT_WINDOW_HEIGHT, getMaxWindowHeight());
   await applyWindowSize(
     preferredWindowWidth,
-    clampWindowHeight(Math.min(window.innerHeight, preferredWindowHeight)),
+    clampWindowHeight(Math.min(window.innerHeight, preferredWindowHeight), getMaxWindowHeight()),
   );
 
   window.setTimeout(() => {
