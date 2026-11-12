@@ -20,18 +20,20 @@ Pinglet 是 Tauri 2 + 原生 TypeScript（无 React/Vue、无 CSS 框架）的 W
 | Prettier 格式化 / 校验 | `npm run format` / `npm run format:check` |
 | 全部 Rust 单元测试 | `cargo test --manifest-path src-tauri/Cargo.toml` |
 | Rust 格式检查 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` |
+| Rust Clippy（零警告门禁） | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` |
+| 版本号一致性校验 | `npm run check:versions` |
 | 运行单个 Rust 测试 | `cargo test --manifest-path src-tauri/Cargo.toml prefers_last_custom_title_over_ai_title` |
 | 打包 NSIS 安装包 | `npm run build:nsis`（或 `npm run tauri build -- --bundles nsis`） |
 | 由唯一源文件重生成图标 | `npx tauri icon assets/app-icon.svg` |
 
 - 打包前先退出正在运行的 Pinglet，否则 release 下的 `pinglet.exe` 被占用会报 `os error 5`。
 - 产物：安装包 `src-tauri/target/release/bundle/nsis/Pinglet_<version>_x64-setup.exe`，便携版 `src-tauri/target/release/pinglet.exe`。
-- 前置依赖：Rust MSVC 工具链、Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK、WebView2 Runtime。
+- 前置依赖：Rust MSVC 工具链（`rust-toolchain.toml` 固定 1.99.1 与 clippy / rustfmt 组件）、Node 22（`.nvmrc`）、Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK、WebView2 Runtime。
 - 浏览器预览在非 Tauri 环境自动加载 `src/mock-sessions.ts`；`http://localhost:1420/?settings=1` 可直接打开设置面板。
 - 前端工具链：`eslint.config.js` + `.prettierrc.json` + `vitest.config.ts`；纯逻辑测试在 `src/session-state.test.ts`、`src/settings-schema.test.ts`、`src/auto-theme.test.ts`、`src/window-animation.test.ts`（`environment: "node"`；auto-theme 用 `vi.mock` 隔离 `settings` / `system` 的 DOM 副作用）。`npm run build` 里的 `tsc` 仍是唯一的前端类型检查。
 - NOTE: 从 Git Bash 以小写盘符路径（如 `d:\…`）启动时，Vitest 5 可能因 ESM 路径盘符大小写不一致报 `Cannot read properties of undefined (reading 'config')`；用 `cd D:/…` 切到大写盘符后再运行即可，与代码无关。
 - Rust 测试位于 `src-tauri/src/lib.rs` 末尾的 `#[cfg(test)] mod tests`（覆盖标题解析、边缘吸附、状态分类、托盘 tooltip / 通知弹窗内容与定位、亮度中位数、托盘动画帧与 VSCode 窗口选择）。
-- CI 配置在 `.github/workflows/ci.yml`：Windows runner 上依次执行 lint、format check、Vitest、前端构建、`cargo fmt --check` 与 `cargo test`；release 流程见 `docs/build.md`。
+- CI 配置在 `.github/workflows/ci.yml`：Windows runner 上依次执行版本号校验、lint、format check、Vitest、前端构建、`cargo fmt --check`、`cargo clippy -- -D warnings` 与 `cargo test`；`release.yml` 先跑同名 `verify` job，标签触发时校验标签与版本一致，产物附带 `SHA256SUMS.txt`；依赖更新由 Dependabot 每周检查。release 流程见 `docs/build.md`。
 
 ## 架构总览
 

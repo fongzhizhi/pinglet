@@ -38,6 +38,17 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "fongzhizhi",
+    "copyright": "Copyright © 2026 fongzhizhi",
+    "category": "Utility",
+    "shortDescription": "Claude Code 会话状态看板",
+    "longDescription": "Pinglet 是只读聚合 Claude Code 本地交互式会话的 Windows 桌面看板，提供四种状态展示、置顶小窗、托盘动画、提醒与通知弹窗。不联网，不写入 Claude 配置或会话数据。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

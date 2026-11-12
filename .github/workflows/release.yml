@@ -8,22 +8,78 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    name: Build NSIS installer
+  verify:
+    name: Verify release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Check versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node scripts/check-versions.mjs --tag "${{ github.ref_name }}"
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: verify
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  release:
+    name: Build NSIS installer
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -39,6 +95,7 @@ jobs:
           releaseName: "Pinglet v__VERSION__"
           releaseBody: |
             Windows 安装包见下方 Assets；便携版解压后直接运行 `Pinglet.exe`。
+            `SHA256SUMS.txt` 提供安装包与便携版可执行文件的 SHA-256 校验和。
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -52,3 +109,18 @@ jobs:
           $archive = "Pinglet_${version}_x64-portable.zip"
           Compress-Archive -Path "src-tauri/target/release/pinglet.exe" -DestinationPath $archive
           gh release upload "v$version" $archive --clobber
+
+      - name: Generate and upload checksums
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = (Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1).FullName
+          $files = @($installer, (Resolve-Path "src-tauri/target/release/pinglet.exe").Path)
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
+            "$hash  $(Split-Path $file -Leaf)"
+          }
+          $lines | Set-Content -Encoding ascii "SHA256SUMS.txt"
+          gh release upload "v$version" "SHA256SUMS.txt" --clobber

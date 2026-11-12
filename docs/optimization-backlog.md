@@ -5,28 +5,22 @@
 > 「优先项」是下一轮建议处理的工程化收尾；「待排期」和「可选/长期」可以按需安排。
 >
 > 2026-11-10：托盘状态图标、自动主题、告警弹窗及配套改进（单实例保护、免打扰、窗口位置记忆、托盘 tooltip、差量更新）的调研与实施计划见 [plans/pinglet-v1.4.md](plans/pinglet-v1.4.md)。
+>
+> 2026-11-12：完成工程护栏与发布质量收尾（Clippy、版本校验、安装包元数据、Dependabot、固定工具链、Release 校验与校验和）。
 
 ## 优先项
 
-- [ ] **P1 Clippy 纳入 CI**
-  - 现状：`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 有 23 条，主要是 edition 2024 的 `collapsible_if`，另有 2 处 `manual_pattern_char_comparison`、1 处 `unnecessary_sort_by`。
-  - 处理：先运行 `cargo clippy --fix` 自动修大部分，手工处理剩余项；在 `.github/workflows/ci.yml` 的 `dtolnay/rust-toolchain` 中加入 `clippy` 组件，并增加 `cargo clippy ... -- -D warnings` 步骤。
-  - 验收：本地与 CI 均无 Clippy warning。
+- [x] **P1 Clippy 纳入 CI**（2026-11-12）
+  - 完成：`cargo clippy --fix` 自动修复 31 处（edition 2024 `collapsible_if`、`manual_pattern_char_comparison`、`as_chunks_mut` 等），手工修复 `unnecessary_sort_by`；当前 `--all-targets -- -D warnings` 零警告。CI 与 Release 的 `verify` job 均加入 Clippy 步骤。
 
-- [ ] **P1 补安装包元数据**
-  - 现状：`src-tauri/tauri.conf.json` 的 `bundle` 只有 `active` / `targets` / `icon`，安装器与 Windows「应用和功能」中的发布者、版权、描述、语言不完整。
-  - 处理：补 `publisher`、`copyright`、`shortDescription`、`longDescription`、`category: "Utility"`；`bundle.windows.nsis` 增加 `languages: ["SimpChinese", "English"]`、`installMode: "currentUser"`。
-  - 验收：安装器与「应用和功能」显示正确的发布者、描述和中文界面。
+- [x] **P1 补安装包元数据**（2026-11-12）
+  - 完成：`bundle` 增加 `publisher`、`copyright`、`category: "Utility"`、`shortDescription`、`longDescription`；`bundle.windows.nsis` 增加 `installMode: "currentUser"`、`languages: ["SimpChinese", "English"]`。安装包界面效果需下次打包时冒烟确认。
 
-- [ ] **P1 版本号与 Release 标签校验**
-  - 现状：版本号分散在 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`；`release.yml` 使用 `tagName: v__VERSION__`，手动触发或标签与版本不一致时可能生成版本号对不上的 Release。
-  - 处理：新增 `scripts/check-versions.mjs`，读取三处版本并在 CI 校验；`release.yml` 在 tag 触发时校验 `github.ref_name == "v$version"`，不一致直接失败。
-  - 验收：版本漂移时 CI/Release 明确报错。
+- [x] **P1 版本号与 Release 标签校验**（2026-11-12）
+  - 完成：新增 `scripts/check-versions.mjs`（`npm run check:versions`），校验三处版本一致与 semver 格式；CI 每次运行校验，标签触发 Release 时额外用 `--tag` 校验标签与版本一致。
 
-- [ ] **P1 Dependabot + 固定工具链**
-  - 现状：没有 Dependabot；CI 使用 `@stable` 和浮动的 Node 22；GitHub Actions 使用 major tag。
-  - 处理：新增 `.github/dependabot.yml`（npm / cargo / github-actions，weekly，分组 minor/patch）；新增 `rust-toolchain.toml`（固定 Rust 1.95.0 + `clippy` / `rustfmt`）和 `.nvmrc`（Node 22），CI 改为读取固定版本。
-  - 验收：依赖更新有 PR 可审，Clippy 不会因工具链升级突然多出新 lint。
+- [x] **P1 Dependabot + 固定工具链**（2026-11-12）
+  - 完成：新增 `.github/dependabot.yml`（npm / cargo / github-actions，每周一，minor/patch 分组）；`rust-toolchain.toml` 固定 Rust 1.99.1 + `clippy` / `rustfmt`；`.nvmrc` 固定 Node 22。CI 与 Release 从这两个文件读取版本。
 
 ## 待排期
 
@@ -36,10 +30,8 @@
   - Rust：把 session 文件解析抽成 `parse_session(&str)` / `read_session_file(path)`，补白名单字段、未知字段忽略、非交互 `kind` 跳过、错误信息不含 JSON、transcript 未命中负缓存等测试。
   - 验收：`npm test` 与 `cargo test` 覆盖上述分支；不引入 DOM 测试框架。
 
-- [ ] **P2 发布流程加固**
-  - 现状：`release.yml` 没有 `concurrency`，tag 发布不经过 CI，也没有产物校验和。
-  - 处理：加 `concurrency`；加 `verify` job（或复用 CI）跑 `npm test` / `cargo test`；生成并上传 `SHA256SUMS`；发布说明可接 CHANGELOG 或自动 notes。
-  - 验收：标签推送不会绕过测试；Release 资产带校验和。
+- [x] **P2 发布流程加固**（2026-11-12）
+  - 完成：`release.yml` 增加 `concurrency`（同 ref 不并发）；新增 `verify` job，标签触发时校验版本、再跑 lint / format / Vitest / 前端构建 / `cargo fmt` / Clippy / `cargo test`，通过后才构建；发布后生成并上传 `SHA256SUMS.txt`（安装包 + 便携版 exe）。发布说明接入 CHANGELOG 仍待后续处理。
 
 - [ ] **P2 CSP 再收紧 + 冒烟**
   - 处理：在 `app.security.csp` / `devCsp` 增加 `base-uri 'none'; form-action 'none'; frame-ancestors 'none'`；评估 `app.security.freezePrototype: true`。

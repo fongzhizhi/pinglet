@@ -2,8 +2,8 @@
 
 ## 环境要求
 
-- Node.js（Vite 8 要求 20.19+ 或 22.12+，建议使用当前 LTS；开发环境为 v22）
-- Rust stable + MSVC 工具链（当前依赖要求 Rust 1.95+，建议直接使用最新 stable）
+- Node.js 22（`.nvmrc` 固定主版本；Vite 8 要求 20.19+ 或 22.12+）
+- Rust + MSVC 工具链：`rust-toolchain.toml` 固定为 1.99.1 并声明 `clippy` / `rustfmt` 组件，rustup 会自动安装
 - Visual Studio Build Tools 的 C++ 工作负载 + Windows SDK
 - WebView2 Runtime（Windows 11 已内置，Windows 10 可能需要单独安装）
 
@@ -17,11 +17,13 @@ npm run dev:desktop    # 前端热更新 + 桌面窗口（等同 npm run tauri d
 提交前可运行与 CI 相同的检查：
 
 ```bash
+npm run check:versions
 npm run lint
 npm run format:check
 npm test
 npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
@@ -74,17 +76,20 @@ NSIS 工具集缓存在 `%LOCALAPPDATA%\tauri\NSIS`，缓存存在时打包不�
 
 Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板「关于」区展示该值。
 
+`npm run check:versions` 会校验三处版本一致且符合 semver；`node scripts/check-versions.mjs --tag v1.4.1` 额外校验发布标签与版本匹配。CI 与 Release 工作流都会执行该检查。
+
 ## CI 与发布
 
-- `.github/workflows/ci.yml`：推送到 `master`、提交 PR 或手动触发时，在 `windows-latest` 上执行 ESLint、Prettier 校验、Vitest、前端构建、`cargo fmt --check` 与 `cargo test`。先构建前端再跑 Rust 测试，因为 `generate_context!` 需要 `dist/`。
-- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时，构建 NSIS 安装包并创建**草稿** Release，同时上传 `Pinglet_<version>_x64-portable.zip`（内含 `pinglet.exe`）。检查草稿内容后再手动发布。
+- `.github/workflows/ci.yml`：推送到 `master`、提交 PR 或手动触发时，在 `windows-latest` 上执行版本号校验、ESLint、Prettier 校验、Vitest、前端构建、`cargo fmt --check`、`cargo clippy -- -D warnings` 与 `cargo test`。先构建前端再跑 Rust 测试，因为 `generate_context!` 需要 `dist/`。
+- `.github/workflows/release.yml`：推送 `v*` 标签或手动触发时，先由 `verify` job 重复完整检查（标签触发时校验标签与版本号一致），通过后再构建 NSIS 安装包并创建**草稿** Release，同时上传 `Pinglet_<version>_x64-portable.zip`（内含 `pinglet.exe`）和 `SHA256SUMS.txt`。检查草稿内容后再手动发布。
+- `.github/dependabot.yml`：npm、cargo 与 GitHub Actions 依赖每周一检查更新，minor/patch 归组为单个 PR。
 
 发布新版本：
 
-1. 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号。
+1. 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号，运行 `npm run check:versions` 确认一致。
 2. 提交并推送 `master`，确认 CI 通过。
 3. 打标签并推送：`git tag v1.4.1`、`git push origin v1.4.1`。
-4. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的安装包与便携版后发布。
+4. 在 GitHub Actions 等待 Release 工作流完成，检查草稿 Release 的安装包、便携版与 `SHA256SUMS.txt` 后发布。
 
 > 如果目标版本的标签已存在，先递增版本号（例如 `1.4.1`）并同步三处版本，再打新标签；不要重复推送同一个标签。
 
@@ -93,7 +98,7 @@ Vite 从 `package.json` 读取版本并注入 `__APP_VERSION__`，设置面板�
 自动流程创建的 Release 默认是**草稿**，需要手动发布：
 
 1. 打开 <https://github.com/fongzhizhi/pinglet/releases>，找到对应版本的草稿。
-2. 确认 Assets 包含 `Pinglet_<version>_x64-setup.exe` 和 `Pinglet_<version>_x64-portable.zip`。
+2. 确认 Assets 包含 `Pinglet_<version>_x64-setup.exe`、`Pinglet_<version>_x64-portable.zip` 与 `SHA256SUMS.txt`。
 3. 按需补充发布说明，点击 **Publish release**。
 
 如果要手动上传本地构建的安装包：

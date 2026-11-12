@@ -1,0 +1,6 @@
+# 固定开发与 CI 的 Rust 工具链，避免 Clippy 因工具链漂移突然新增 lint。
+# 升级时同步修改 .github/workflows/ci.yml 与 release.yml 中的 toolchain。
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

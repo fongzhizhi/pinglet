@@ -241,10 +241,10 @@ fn session_key(row: &SessionRow) -> String {
 /// 已中断仍只用会话身份：进程已死，文件被重写不应再次唤醒弹窗。
 fn alert_event_key(row: &SessionRow, kind: BoardKind) -> String {
     let key = session_key(row);
-    if kind == BoardKind::Blocked {
-        if let Some(timestamp) = row.status_updated_at {
-            return format!("{key}:{timestamp}");
-        }
+    if kind == BoardKind::Blocked
+        && let Some(timestamp) = row.status_updated_at
+    {
+        return format!("{key}:{timestamp}");
     }
     key
 }
@@ -444,7 +444,7 @@ fn build_hidden_tray_frame(base: &Image<'_>) -> Image<'static> {
     }
 
     let mut pixels = source[..expected_len].to_vec();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = TRAY_HIDDEN_ALPHA;
     }
     Image::new_owned(pixels, width, height)
@@ -467,7 +467,7 @@ fn scale_tray_alpha(base: &Image<'_>, alpha_scale: f64) -> Image<'static> {
 
     let alpha_scale = alpha_scale.clamp(0.0, 1.0);
     let mut pixels = source[..expected_len].to_vec();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = (f64::from(pixel[3]) * alpha_scale).round() as u8;
     }
     Image::new_owned(pixels, width, height)
@@ -656,10 +656,10 @@ fn collect_sessions() -> ListResult {
         match fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str::<RawSession>(&content) {
                 Ok(session) => {
-                    if let Some(kind) = session.kind.as_deref() {
-                        if !kind.eq_ignore_ascii_case(SESSION_KIND_INTERACTIVE) {
-                            continue;
-                        }
+                    if let Some(kind) = session.kind.as_deref()
+                        && !kind.eq_ignore_ascii_case(SESSION_KIND_INTERACTIVE)
+                    {
+                        continue;
                     }
                     sessions.push((session, modified_ms(&path)));
                 }
@@ -681,10 +681,10 @@ fn collect_sessions() -> ListResult {
             None
         }
     };
-    if let Some(system) = system.as_mut() {
-        if !pids.is_empty() {
-            system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
-        }
+    if let Some(system) = system.as_mut()
+        && !pids.is_empty()
+    {
+        system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
     }
 
     for (session, file_modified_at) in sessions {
@@ -860,7 +860,7 @@ fn select_vscode_window<'a>(
             vscode_title_score(&candidate.title, directory).map(|score| (score, *candidate))
         })
         .collect();
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    scored.sort_by_key(|left| std::cmp::Reverse(left.0));
 
     if let Some((_, target)) = scored.first() {
         return Ok(*target);
@@ -1161,7 +1161,7 @@ fn normalize_path_key(value: &str) -> String {
         .trim()
         .trim_matches('"')
         .replace('/', "\\")
-        .trim_end_matches(|character| character == '\\' || character == '.')
+        .trim_end_matches(['\\', '.'])
         .to_lowercase()
 }
 
@@ -1200,12 +1200,11 @@ fn apply_click_through(
         .map_err(|err| format!("设置鼠标穿透失败: {err}"))?;
     state.click_through.store(enabled, Ordering::Relaxed);
 
-    if let Ok(item) = state.click_through_item.lock() {
-        if let Some(item) = item.as_ref() {
-            if let Err(err) = item.set_checked(enabled) {
-                eprintln!("pinglet: 同步托盘穿透勾选状态失败: {err}");
-            }
-        }
+    if let Ok(item) = state.click_through_item.lock()
+        && let Some(item) = item.as_ref()
+        && let Err(err) = item.set_checked(enabled)
+    {
+        eprintln!("pinglet: 同步托盘穿透勾选状态失败: {err}");
     }
     if let Err(err) = app.emit("pinglet://click-through-changed", enabled) {
         eprintln!("pinglet: 广播鼠标穿透状态失败: {err}");
@@ -1259,21 +1258,21 @@ fn set_global_shortcut(
         .lock()
         .map_err(|_| "快捷键状态锁不可用".to_string())?;
 
-    if let Some(previous) = previous {
-        if let Err(err) = app.global_shortcut().unregister(previous) {
-            eprintln!("pinglet: 注销旧快捷键失败: {err}");
-        }
+    if let Some(previous) = previous
+        && let Err(err) = app.global_shortcut().unregister(previous)
+    {
+        eprintln!("pinglet: 注销旧快捷键失败: {err}");
     }
 
-    if let Some(shortcut) = parsed {
-        if let Err(err) = app.global_shortcut().register(shortcut) {
-            if let Some(previous) = previous {
-                if let Err(restore_err) = app.global_shortcut().register(previous) {
-                    eprintln!("pinglet: 恢复旧快捷键失败: {restore_err}");
-                }
-            }
-            return Err(format!("注册快捷键失败: {err}"));
+    if let Some(shortcut) = parsed
+        && let Err(err) = app.global_shortcut().register(shortcut)
+    {
+        if let Some(previous) = previous
+            && let Err(restore_err) = app.global_shortcut().register(previous)
+        {
+            eprintln!("pinglet: 恢复旧快捷键失败: {restore_err}");
         }
+        return Err(format!("注册快捷键失败: {err}"));
     }
 
     *state
@@ -1341,7 +1340,7 @@ fn median_luminance(samples: &mut [f32]) -> Option<f32> {
     }
     samples.sort_by(f32::total_cmp);
     let middle = samples.len() / 2;
-    if samples.len() % 2 == 0 {
+    if samples.len().is_multiple_of(2) {
         Some((samples[middle - 1] + samples[middle]) / 2.0)
     } else {
         Some(samples[middle])
@@ -1466,12 +1465,11 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 /// 同步托盘「显示」勾选状态。
 fn sync_show_item(state: &AppState, visible: bool) {
-    if let Ok(item) = state.show_item.lock() {
-        if let Some(item) = item.as_ref() {
-            if let Err(err) = item.set_checked(visible) {
-                eprintln!("pinglet: 同步托盘显示勾选状态失败: {err}");
-            }
-        }
+    if let Ok(item) = state.show_item.lock()
+        && let Some(item) = item.as_ref()
+        && let Err(err) = item.set_checked(visible)
+    {
+        eprintln!("pinglet: 同步托盘显示勾选状态失败: {err}");
     }
 }
 
@@ -1493,10 +1491,10 @@ fn sync_window_activity(app: &tauri::AppHandle) {
         refresh_tray(app, Instant::now());
     }
 
-    if previous != active {
-        if let Err(err) = window.emit(EVENT_WINDOW_VISIBILITY, active) {
-            eprintln!("pinglet: 广播窗口可见性失败: {err}");
-        }
+    if previous != active
+        && let Err(err) = window.emit(EVENT_WINDOW_VISIBILITY, active)
+    {
+        eprintln!("pinglet: 广播窗口可见性失败: {err}");
     }
 }
 
@@ -1564,15 +1562,15 @@ fn show_main_window(app: &tauri::AppHandle) {
     state.window_hide_generation.fetch_add(1, Ordering::Relaxed);
 
     // 穿透状态下窗口收不到任何点击，必须先恢复可点击
-    if state.click_through.load(Ordering::Relaxed) {
-        if let Err(err) = apply_click_through(app, &state, false) {
-            eprintln!("pinglet: 关闭鼠标穿透失败: {err}");
-        }
+    if state.click_through.load(Ordering::Relaxed)
+        && let Err(err) = apply_click_through(app, &state, false)
+    {
+        eprintln!("pinglet: 关闭鼠标穿透失败: {err}");
     }
-    if window.is_minimized().unwrap_or(false) {
-        if let Err(err) = window.unminimize() {
-            eprintln!("pinglet: 还原窗口失败: {err}");
-        }
+    if window.is_minimized().unwrap_or(false)
+        && let Err(err) = window.unminimize()
+    {
+        eprintln!("pinglet: 还原窗口失败: {err}");
     }
     if let Err(err) = window.show() {
         eprintln!("pinglet: 显示窗口失败: {err}");
@@ -1893,10 +1891,10 @@ fn snap_window_to_edges(window: &tauri::Window) {
         &mut edges,
     );
 
-    if x != position.x || y != position.y {
-        if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
-            eprintln!("pinglet: 窗口吸附失败: {err}");
-        }
+    if (x != position.x || y != position.y)
+        && let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y))
+    {
+        eprintln!("pinglet: 窗口吸附失败: {err}");
     }
 }
 
@@ -1913,7 +1911,7 @@ fn is_json_file(path: &Path) -> bool {
 }
 
 fn directory_name(cwd: &str) -> Option<String> {
-    let trimmed = cwd.trim_end_matches(|character| character == '\\' || character == '/');
+    let trimmed = cwd.trim_end_matches(['\\', '/']);
     Path::new(trimmed)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1952,12 +1950,11 @@ fn is_safe_session_id(value: &str) -> bool {
 /// 按 sessionId 在 ~/.claude/projects/*/ 下查找 transcript，不硬编码项目 slug 转义规则。
 /// NOTE: 未命中结果缓存一段时间，避免为尚未生成 transcript 的新会话重复扫描目录。
 fn find_transcript(session_id: &str) -> Option<PathBuf> {
-    if let Ok(cache) = transcript_miss_cache().lock() {
-        if let Some(checked_at) = cache.get(session_id) {
-            if checked_at.elapsed() < TRANSCRIPT_MISS_CACHE_TTL {
-                return None;
-            }
-        }
+    if let Ok(cache) = transcript_miss_cache().lock()
+        && let Some(checked_at) = cache.get(session_id)
+        && checked_at.elapsed() < TRANSCRIPT_MISS_CACHE_TTL
+    {
+        return None;
     }
 
     let projects = projects_dir()?;
@@ -1989,16 +1986,16 @@ fn resolve_session_title(
         return internal_name.to_string();
     }
 
-    if let Some(session_id) = session_id.filter(|value| is_safe_session_id(value)) {
-        if let Some(title) = transcript_title(session_id) {
-            return title;
-        }
+    if let Some(session_id) = session_id.filter(|value| is_safe_session_id(value))
+        && let Some(title) = transcript_title(session_id)
+    {
+        return title;
     }
 
-    if name_source.is_some_and(|source| source.eq_ignore_ascii_case("derived")) {
-        if let Some(directory) = cwd.and_then(directory_name) {
-            return directory;
-        }
+    if name_source.is_some_and(|source| source.eq_ignore_ascii_case("derived"))
+        && let Some(directory) = cwd.and_then(directory_name)
+    {
+        return directory;
     }
 
     internal_name.to_string()
@@ -2114,10 +2111,10 @@ fn update_cached_title(cached: &mut CachedTitle, size: u64) {
             .head_scanned_size
             .saturating_sub(TITLE_SCAN_OVERLAP_BYTES);
         if head_end > head_start {
-            if let Some(text) = read_file_slice(&path, head_start, head_end - head_start) {
-                if let Some(title) = last_title_record(&text, "ai-title", "aiTitle") {
-                    cached.ai_title = Some(title);
-                }
+            if let Some(text) = read_file_slice(&path, head_start, head_end - head_start)
+                && let Some(title) = last_title_record(&text, "ai-title", "aiTitle")
+            {
+                cached.ai_title = Some(title);
             }
             cached.head_scanned_size = head_end;
         }
@@ -2125,12 +2122,11 @@ fn update_cached_title(cached: &mut CachedTitle, size: u64) {
 
     let tail_start = cached.file_size.saturating_sub(TITLE_SCAN_OVERLAP_BYTES);
     let start = tail_start.max(size.saturating_sub(TITLE_TAIL_MAX_BYTES));
-    if size > start {
-        if let Some(text) = read_file_slice(&path, start, size - start) {
-            if let Some(title) = last_title_record(&text, "custom-title", "customTitle") {
-                cached.custom_title = Some(title);
-            }
-        }
+    if size > start
+        && let Some(text) = read_file_slice(&path, start, size - start)
+        && let Some(title) = last_title_record(&text, "custom-title", "customTitle")
+    {
+        cached.custom_title = Some(title);
     }
 
     cached.file_size = size;
@@ -2232,10 +2228,10 @@ fn clamp_window_into_work_area(window: &tauri::WebviewWindow) {
 
     let x = position.x.clamp(left, (right - width).max(left));
     let y = position.y.clamp(top, (bottom - height).max(top));
-    if x != position.x || y != position.y {
-        if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
-            eprintln!("pinglet: 修正窗口位置失败: {err}");
-        }
+    if (x != position.x || y != position.y)
+        && let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y))
+    {
+        eprintln!("pinglet: 修正窗口位置失败: {err}");
     }
 }
 
@@ -2462,10 +2458,10 @@ fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
             {
                 return;
             }
-            if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
-                if let Err(err) = hide_notification_window_raw(&window) {
-                    eprintln!("pinglet: 自动隐藏通知弹窗失败: {err}");
-                }
+            if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
+                && let Err(err) = hide_notification_window_raw(&window)
+            {
+                eprintln!("pinglet: 自动隐藏通知弹窗失败: {err}");
             }
         });
     if let Err(err) = result {
@@ -2489,10 +2485,10 @@ fn hide_notification_window(app: tauri::AppHandle) {
     app.state::<AppState>()
         .notification_generation
         .fetch_add(1, Ordering::Relaxed);
-    if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
-        if let Err(err) = hide_notification_window_raw(&window) {
-            eprintln!("pinglet: 隐藏通知弹窗失败: {err}");
-        }
+    if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
+        && let Err(err) = hide_notification_window_raw(&window)
+    {
+        eprintln!("pinglet: 隐藏通知弹窗失败: {err}");
     }
 }
 
@@ -2612,7 +2608,7 @@ pub fn run() {
                         if let Err(err) = window.hide() {
                             eprintln!("pinglet: 隐藏到托盘失败: {err}");
                         } else {
-                            sync_window_activity(&window.app_handle());
+                            sync_window_activity(window.app_handle());
                         }
                     } else {
                         // 关闭行为设为“退出”时，X 按钮要结束整个应用，而不是留下托盘空转
@@ -2625,7 +2621,7 @@ pub fn run() {
                         eprintln!("pinglet: 广播窗口移动失败: {err}");
                     }
                 }
-                WindowEvent::Resized(_) => sync_window_activity(&window.app_handle()),
+                WindowEvent::Resized(_) => sync_window_activity(window.app_handle()),
                 _ => {}
             }
         })

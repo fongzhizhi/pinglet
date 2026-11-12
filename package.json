@@ -29,7 +29,8 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "check:versions": "node scripts/check-versions.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

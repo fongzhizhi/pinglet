@@ -33,5 +33,11 @@ export default tseslint.config(
       "no-undef": "off",
     },
   },
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   prettier,
 );
