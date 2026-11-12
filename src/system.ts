@@ -180,12 +180,17 @@ export async function sampleBackdropLuminance(): Promise<number | null> {
   return invoke<number | null>("sample_backdrop_luminance");
 }
 
-export async function setNotificationPreferences(
+export async function setActivityPreferences(
   systemNotifications: boolean,
-  doNotDisturb: boolean,
+  trayWorkingBreathing: boolean,
+  trayAlertFlicker: boolean,
 ): Promise<void> {
   requireTauri();
-  await invoke("set_notification_preferences", { systemNotifications, doNotDisturb });
+  await invoke("set_activity_preferences", {
+    systemNotifications,
+    trayWorkingBreathing,
+    trayAlertFlicker,
+  });
 }
 
 /** 恢复默认窗口位置并刷新 window-state 存档，供「恢复默认」使用。 */

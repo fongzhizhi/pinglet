@@ -51,8 +51,8 @@ import {
   setAutoStart,
   setClickThrough,
   setCloseToTray,
+  setActivityPreferences,
   setGlobalShortcut,
-  setNotificationPreferences,
   startResizeDragging,
   toMessage,
   type ResizeDirection,
@@ -768,16 +768,10 @@ function playShakeEffect(kind: BreathingKind = "alert"): void {
 }
 
 function triggerAlertReminder(state: AbnormalState): void {
-  const { reminders, doNotDisturb } = getSettings();
-  if (reminders.none) {
-    return;
-  }
+  const { reminders } = getSettings();
 
-  // 免打扰仍更新告警色（托盘状态与计数照常），只跳过闪烁、音效与抖动
+  // 告警色始终更新；呼吸灯、音效与抖动各自独立开关
   setAlertColor(state);
-  if (doNotDisturb) {
-    return;
-  }
   if (reminders.breathing) {
     playBreathingEffect(ALERT_BREATHING_CYCLES, "alert");
   }
@@ -791,10 +785,7 @@ function triggerAlertReminder(state: AbnormalState): void {
 
 /** 完成提示：呼吸灯用进行中语义色闪烁一次，音效响一次，窗口抖动一次。 */
 function triggerCompletionReminder(): void {
-  const { reminders, doNotDisturb } = getSettings();
-  if (reminders.none || doNotDisturb) {
-    return;
-  }
+  const { reminders } = getSettings();
   // 异常提醒进行中时不让完成呼吸打断它的颜色与轮次，但音效与抖动照常
   if (reminders.breathing && breathingKind !== "alert") {
     setAlertColor("working");
@@ -1524,14 +1515,20 @@ function applyCloseAction(closeToTray: boolean): void {
   closeButton.title = actionLabel;
 }
 
-/** 通知弹窗偏好由 Rust 后台线程判定，设置变化时同步过去；浏览器预览无事可做。 */
-function syncNotificationPreferences(systemNotifications: boolean, doNotDisturb: boolean): void {
+/** 通知消息与托盘动效由 Rust 后台线程驱动，设置变化时同步过去；浏览器预览无事可做。 */
+function syncActivityPreferences(
+  systemNotifications: boolean,
+  trayWorkingBreathing: boolean,
+  trayAlertFlicker: boolean,
+): void {
   if (!IS_TAURI) {
     return;
   }
-  void setNotificationPreferences(systemNotifications, doNotDisturb).catch((error: unknown) => {
-    console.warn("pinglet: 同步通知弹窗偏好失败", error);
-  });
+  void setActivityPreferences(systemNotifications, trayWorkingBreathing, trayAlertFlicker).catch(
+    (error: unknown) => {
+      console.warn("pinglet: 同步通知与托盘动效偏好失败", error);
+    },
+  );
 }
 
 async function resetAllSettings(): Promise<void> {
@@ -1550,8 +1547,12 @@ async function resetAllSettings(): Promise<void> {
         run: setGlobalShortcut(defaults.shortcut === "" ? null : defaults.shortcut),
       },
       {
-        label: "通知弹窗偏好",
-        run: setNotificationPreferences(defaults.systemNotifications, defaults.doNotDisturb),
+        label: "通知与托盘动效偏好",
+        run: setActivityPreferences(
+          defaults.systemNotifications,
+          defaults.trayEffects.workingBreathing,
+          defaults.trayEffects.alertFlicker,
+        ),
       },
       { label: "窗口位置", run: resetWindowPosition() },
     ];
@@ -1750,7 +1751,11 @@ const initialSettings = getSettings();
 let lastThemeMode = initialSettings.theme;
 applyPinned(initialSettings.pinned);
 applyCloseAction(initialSettings.closeToTray);
-syncNotificationPreferences(initialSettings.systemNotifications, initialSettings.doNotDisturb);
+syncActivityPreferences(
+  initialSettings.systemNotifications,
+  initialSettings.trayEffects.workingBreathing,
+  initialSettings.trayEffects.alertFlicker,
+);
 startAutoTheme();
 window.setTimeout(() => {
   setThemeTransitionEnabled(true);
@@ -1763,7 +1768,11 @@ subscribeSettings(() => {
     lastThemeMode = settings.theme;
     startAutoTheme();
   }
-  syncNotificationPreferences(settings.systemNotifications, settings.doNotDisturb);
+  syncActivityPreferences(
+    settings.systemNotifications,
+    settings.trayEffects.workingBreathing,
+    settings.trayEffects.alertFlicker,
+  );
   // 字号变化会改变内容高度，下一帧重新按内容调整窗口
   window.requestAnimationFrame(() => {
     void resizeWindowToContent();

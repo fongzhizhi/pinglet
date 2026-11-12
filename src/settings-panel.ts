@@ -10,7 +10,6 @@ import {
   setAutoStartSetting,
   setClickThroughSetting,
   setCloseToTraySetting,
-  setDoNotDisturbSetting,
   setFontSize,
   setPanelEffect,
   setReminder,
@@ -18,6 +17,7 @@ import {
   setSystemNotificationsSetting,
   setTheme,
   setTransparencySetting,
+  setTrayEffect,
   subscribeSettings,
   type FontSize,
   type ReminderKey,
@@ -112,6 +112,13 @@ function createSection(title: string): HTMLElement {
 
   section.append(heading);
   return section;
+}
+
+function createSubsectionTitle(title: string): HTMLHeadingElement {
+  const heading = document.createElement("h3");
+  heading.className = "settings-subsection-title";
+  heading.textContent = title;
+  return heading;
 }
 
 function createSettingRow(labelText: string): {
@@ -300,8 +307,8 @@ export function mountSettingsPanel(
   header.append(headerTitle, backButton);
   fragment.append(header);
 
-  // ============ 外观与提醒 ============
-  const appearanceSection = createSection("外观与提醒");
+  // ============ 外观 ============
+  const appearanceSection = createSection("外观");
 
   const themeRow = createSettingRow("主题");
   const themeControl = createSegmentedControl("主题", THEME_OPTIONS, initial.theme, (theme) => {
@@ -347,8 +354,15 @@ export function mountSettingsPanel(
   transparencyRow.row.append(transparencyControl);
   appearanceSection.append(transparencyRow.row);
 
-  const reminderRow = createSettingRow("提醒方式");
-  reminderRow.row.title = "窗口可见时的窗口内提醒，与通知消息相互独立";
+  fragment.append(appearanceSection);
+
+  // ============ 显示面板时 ============
+  const visibleSection = createSection("显示面板时");
+  visibleSection.append(createSubsectionTitle("窗口"));
+
+  const reminderRow = document.createElement("div");
+  reminderRow.className = "setting-row";
+  reminderRow.title = "窗口可见时的应用内一次性提醒，与「最小化时」的效果相互独立";
   const reminderGroup = document.createElement("div");
   reminderGroup.className = "reminder-group";
   const reminderInputs: HTMLInputElement[] = [];
@@ -361,20 +375,10 @@ export function mountSettingsPanel(
     reminderInputs.push(input);
     reminderGroup.append(row);
   }
-  reminderRow.row.append(reminderGroup);
-  appearanceSection.append(reminderRow.row);
+  reminderRow.append(reminderGroup);
+  visibleSection.append(reminderRow);
 
-  const alertPulseRow = createSwitchRow(
-    "异常行呼吸灯",
-    initial.panelEffects.alertPulse,
-    false,
-    (enabled) => {
-      setPanelEffect("alertPulse", enabled);
-    },
-  );
-  alertPulseRow.row.title =
-    "待处理 / 已中断会话行持续呼吸：背景呼吸 + 状态灯扩散光环；与「提醒方式」的一次性提醒相互独立";
-  appearanceSection.append(alertPulseRow.row);
+  visibleSection.append(createSubsectionTitle("面板"));
 
   const workingFlowRow = createSwitchRow(
     "进行中行流光",
@@ -385,7 +389,24 @@ export function mountSettingsPanel(
     },
   );
   workingFlowRow.row.title = "进行中会话行底部循环流动的光带，表示任务仍在执行";
-  appearanceSection.append(workingFlowRow.row);
+  visibleSection.append(workingFlowRow.row);
+
+  const alertPulseRow = createSwitchRow(
+    "异常行呼吸灯",
+    initial.panelEffects.alertPulse,
+    false,
+    (enabled) => {
+      setPanelEffect("alertPulse", enabled);
+    },
+  );
+  alertPulseRow.row.title =
+    "待处理 / 已中断会话行持续呼吸：背景呼吸 + 状态灯扩散光环；与「窗口」的一次性提醒相互独立";
+  visibleSection.append(alertPulseRow.row);
+
+  fragment.append(visibleSection);
+
+  // ============ 最小化时 ============
+  const minimizedSection = createSection("最小化时");
 
   const systemNotificationsRow = createSwitchRow(
     "通知消息",
@@ -396,19 +417,34 @@ export function mountSettingsPanel(
     },
   );
   systemNotificationsRow.row.title =
-    "仅在窗口隐藏或最小化且出现新异常时，在主屏右下角弹出应用内通知卡片，5 秒后自动隐藏；与提醒方式相互独立";
-  appearanceSection.append(systemNotificationsRow.row);
+    "窗口隐藏或最小化且出现新异常时，在主屏右下角弹出应用内通知卡片，5 秒后自动隐藏";
+  minimizedSection.append(systemNotificationsRow.row);
 
-  const doNotDisturbRow = createSwitchRow("免打扰", initial.doNotDisturb, false, (enabled) => {
-    setDoNotDisturbSetting(enabled);
-  });
-  // NOTE: 这里只控制 Pinglet 自己的提醒链路；Windows 系统「请勿打扰」是另一层开关，
-  // 且 Windows 11 22621 上没有可靠的 API 能读取它，因此不做自动探测。
-  doNotDisturbRow.row.title =
-    "暂停应用内的全部提醒与托盘闪烁，保留托盘告警色和计数；与 Windows 系统「请勿打扰」相互独立";
-  appearanceSection.append(doNotDisturbRow.row);
+  const trayWorkingRow = createSwitchRow(
+    "进行中呼吸效果",
+    initial.trayEffects.workingBreathing,
+    !IS_TAURI,
+    (enabled) => {
+      setTrayEffect("workingBreathing", enabled);
+    },
+  );
+  trayWorkingRow.row.title =
+    "窗口隐藏或最小化且存在进行中会话时，托盘图标呼吸明暗；关闭后保持静态图标";
+  minimizedSection.append(trayWorkingRow.row);
 
-  fragment.append(appearanceSection);
+  const trayAlertRow = createSwitchRow(
+    "异常时闪烁效果",
+    initial.trayEffects.alertFlicker,
+    !IS_TAURI,
+    (enabled) => {
+      setTrayEffect("alertFlicker", enabled);
+    },
+  );
+  trayAlertRow.row.title =
+    "窗口隐藏或最小化且出现新告警时，托盘图标隐藏 / 显示交替闪烁；关闭后保持静态图标";
+  minimizedSection.append(trayAlertRow.row);
+
+  fragment.append(minimizedSection);
 
   // ============ 系统与行为 ============
   const systemSection = createSection("系统与行为");
@@ -635,13 +671,14 @@ export function mountSettingsPanel(
 
     alertPulseRow.input.checked = current.panelEffects.alertPulse;
     workingFlowRow.input.checked = current.panelEffects.workingFlow;
+    trayWorkingRow.input.checked = current.trayEffects.workingBreathing;
+    trayAlertRow.input.checked = current.trayEffects.alertFlicker;
 
     autoStartRow.input.checked = current.autoStart;
     closeToTrayRow.input.checked = current.closeToTray;
     clickThroughRow.input.checked = current.clickThrough;
     shortcutInput.value = current.shortcut;
     systemNotificationsRow.input.checked = current.systemNotifications;
-    doNotDisturbRow.input.checked = current.doNotDisturb;
   }
 
   async function syncSystemState(): Promise<void> {

@@ -16,6 +16,7 @@ import {
   type ReminderKey,
   type Settings,
   type ThemeMode,
+  type TrayEffectKey,
 } from "./settings-schema";
 
 export {
@@ -35,6 +36,8 @@ export {
   type Reminders,
   type Settings,
   type ThemeMode,
+  type TrayEffectKey,
+  type TrayEffects,
 } from "./settings-schema";
 
 /** 自动主题的生效结果单独持久化：通知弹窗是独立 WebView，不运行采样，需要复用主窗口的判定。 */
@@ -60,6 +63,7 @@ export function getSettings(): Settings {
     ...settings,
     reminders: { ...settings.reminders },
     panelEffects: { ...settings.panelEffects },
+    trayEffects: { ...settings.trayEffects },
   };
 }
 
@@ -151,12 +155,22 @@ export function setReminder(key: ReminderKey, enabled: boolean): void {
   } else {
     reminders[key] = enabled;
     reminders.none = false;
+    // 三项全部取消时自动勾选「无」，保持界面与实际状态一致
     if (!reminders.breathing && !reminders.sound && !reminders.shake) {
       reminders.none = true;
     }
   }
 
   settings.reminders = reminders;
+  persist();
+  notify();
+}
+
+export function setTrayEffect(key: TrayEffectKey, enabled: boolean): void {
+  if (settings.trayEffects[key] === enabled) {
+    return;
+  }
+  settings.trayEffects = { ...settings.trayEffects, [key]: enabled };
   persist();
   notify();
 }
@@ -203,15 +217,6 @@ export function setPinnedSetting(pinned: boolean): void {
     return;
   }
   settings.pinned = pinned;
-  persist();
-  notify();
-}
-
-export function setDoNotDisturbSetting(enabled: boolean): void {
-  if (settings.doNotDisturb === enabled) {
-    return;
-  }
-  settings.doNotDisturb = enabled;
   persist();
   notify();
 }

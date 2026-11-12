@@ -81,15 +81,6 @@ const TRAY_ALERT_PERIOD: Duration = Duration::from_millis(1000);
 /// NOTE: Windows 会把 alpha 全为 0 的 32bpp 图标按不透明黑色绘制（RGB 为黑时就是黑方块）；
 /// 保留 1/255 才能走 alpha 混合，视觉上仍不可见。
 const TRAY_HIDDEN_ALPHA: u8 = 1;
-/// 托盘专用图标：原三色信号图形 + 深绿空心圆角描边，内部保持透明。
-/// NOTE: 深绿在亮 / 暗任务栏上都有明确轮廓，同时比纯黑更接近品牌色。
-const TRAY_BADGE_BORDER_COLOR: [u8; 3] = [4, 120, 87];
-/// 图形缩到 0.85，与 2px 描边留出间距，避免红色弧线贴到边框。
-const TRAY_BADGE_GLYPH_SCALE: f64 = 0.85;
-/// 圆角半径占短边的比例，接近 Windows 11 应用图标的圆角。
-const TRAY_BADGE_CORNER_RATIO: f64 = 0.22;
-/// 描边宽度占短边的比例，32px 下约 2px，缩放到 16px 托盘后约 1px。
-const TRAY_BADGE_BORDER_RATIO: f64 = 0.0625;
 /// 通知弹窗单条最多列举数与标题截断长度，避免内容过长。
 const NOTIFICATION_MAX_ITEMS: usize = 3;
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 24;
@@ -367,70 +358,6 @@ impl TrayIcons {
     }
 }
 
-/// 托盘专用图标：原三色信号图形 + 深绿空心圆角描边。
-/// NOTE: 圆底会裁掉方形画布四角的红色弧线，只能把图形缩到 0.765；圆角方框能容纳更大的图形。
-fn build_tray_badge_icon(base: &Image<'_>) -> Image<'static> {
-    let width = base.width();
-    let height = base.height();
-    let expected_len = width as usize * height as usize * 4;
-    if width == 0 || height == 0 || base.rgba().len() < expected_len {
-        return base.clone().to_owned();
-    }
-
-    let glyph = scale_tray_icon(base, TRAY_BADGE_GLYPH_SCALE);
-    let side = f64::from(width.min(height));
-    let outer_radius = side * TRAY_BADGE_CORNER_RATIO;
-    let border = side * TRAY_BADGE_BORDER_RATIO;
-    let inner_radius = (outer_radius - border).max(0.0);
-    let mut pixels = vec![0_u8; expected_len];
-
-    for y in 0..height {
-        for x in 0..width {
-            let outer = rounded_rect_coverage(x, y, width, height, 0.0, outer_radius);
-            if outer <= 0.0 {
-                continue;
-            }
-
-            // 外框覆盖率减去内框覆盖率就是描边环；环内像素保持透明，只叠图形。
-            let inner = if border > 0.0 {
-                rounded_rect_coverage(x, y, width, height, border, inner_radius)
-            } else {
-                0.0
-            };
-            let ring = (outer - inner).clamp(0.0, 1.0);
-            let index = ((y * width + x) * 4) as usize;
-            let glyph_alpha = f64::from(glyph.rgba()[index + 3]) / 255.0;
-            let alpha = glyph_alpha + ring * (1.0 - glyph_alpha);
-            if alpha <= 0.0 {
-                continue;
-            }
-
-            for channel in 0..3 {
-                let border_color = f64::from(TRAY_BADGE_BORDER_COLOR[channel]);
-                let glyph_color = f64::from(glyph.rgba()[index + channel]);
-                let premultiplied =
-                    glyph_color * glyph_alpha + border_color * ring * (1.0 - glyph_alpha);
-                pixels[index + channel] = (premultiplied / alpha).round().clamp(0.0, 255.0) as u8;
-            }
-            pixels[index + 3] = (alpha * 255.0).round() as u8;
-        }
-    }
-
-    Image::new_owned(pixels, width, height)
-}
-
-/// 像素中心到圆角矩形边界的近似距离，返回 0–1 覆盖率做 1px 抗锯齿。
-/// `inset` 表示从画布边缘向内收缩的距离，用于计算描边内边界。
-fn rounded_rect_coverage(x: u32, y: u32, width: u32, height: u32, inset: f64, radius: f64) -> f64 {
-    let half_width = f64::from(width) / 2.0 - inset;
-    let half_height = f64::from(height) / 2.0 - inset;
-    let offset_x = (f64::from(x) + 0.5 - f64::from(width) / 2.0).abs() - (half_width - radius);
-    let offset_y = (f64::from(y) + 0.5 - f64::from(height) / 2.0).abs() - (half_height - radius);
-    let outside = offset_x.max(0.0).hypot(offset_y.max(0.0));
-    let inside = offset_x.max(offset_y).min(0.0);
-    (0.5 - (outside + inside - radius)).clamp(0.0, 1.0)
-}
-
 fn build_tray_icons(base: &Image<'_>) -> TrayIcons {
     TrayIcons {
         idle: vec![base.clone().to_owned()],
@@ -546,7 +473,7 @@ fn scale_tray_alpha(base: &Image<'_>, alpha_scale: f64) -> Image<'static> {
     Image::new_owned(pixels, width, height)
 }
 
-/// 围绕画布中心缩放图标；缩小后四周补透明像素，保证弹跳不越界。
+/// 围绕画布中心缩放图标；缩小后四周补透明像素，避免呼吸收缩时越界。
 /// NOTE: 采样先乘 alpha 再插值（预乘 alpha），避免透明边缘与图形混色产生暗边。
 fn scale_tray_icon(base: &Image<'_>, scale: f64) -> Image<'static> {
     let width = base.width();
@@ -640,7 +567,9 @@ struct AppState {
     click_through: AtomicBool,
     tray_ready: AtomicBool,
     system_notifications: AtomicBool,
-    do_not_disturb: AtomicBool,
+    /// 托盘进行中呼吸 / 异常闪烁的开关；关闭时对应状态显示静态图标。
+    tray_working_breathing: AtomicBool,
+    tray_alert_flicker: AtomicBool,
     tray_alert_unread: AtomicBool,
     window_active: AtomicBool,
     show_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
@@ -665,7 +594,8 @@ impl Default for AppState {
             click_through: AtomicBool::new(false),
             tray_ready: AtomicBool::new(false),
             system_notifications: AtomicBool::new(true),
-            do_not_disturb: AtomicBool::new(false),
+            tray_working_breathing: AtomicBool::new(true),
+            tray_alert_flicker: AtomicBool::new(true),
             tray_alert_unread: AtomicBool::new(false),
             window_active: AtomicBool::new(true),
             show_item: Mutex::new(None),
@@ -1354,29 +1284,24 @@ fn set_global_shortcut(
     Ok(())
 }
 
-/// 前端设置变化时同步免打扰与通知消息开关，托盘闪烁立即按新状态生效。
+/// 前端设置变化时同步通知消息与托盘动效开关，托盘效果立即按新状态生效。
 #[tauri::command]
-fn set_notification_preferences(
+fn set_activity_preferences(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     system_notifications: bool,
-    do_not_disturb: bool,
+    tray_working_breathing: bool,
+    tray_alert_flicker: bool,
 ) {
     state
         .system_notifications
         .store(system_notifications, Ordering::Relaxed);
-    let previous_dnd = state.do_not_disturb.swap(do_not_disturb, Ordering::Relaxed);
-    // 关闭免打扰时重新评估当前告警：窗口仍隐藏且仍有告警，则恢复未读闪烁
-    if previous_dnd && !do_not_disturb && !state.window_active.load(Ordering::Relaxed) {
-        let has_alert = state
-            .tray_runtime
-            .lock()
-            .map(|runtime| runtime.blocked + runtime.interrupted > 0)
-            .unwrap_or(false);
-        if has_alert {
-            state.tray_alert_unread.store(true, Ordering::Relaxed);
-        }
-    }
+    state
+        .tray_working_breathing
+        .store(tray_working_breathing, Ordering::Relaxed);
+    state
+        .tray_alert_flicker
+        .store(tray_alert_flicker, Ordering::Relaxed);
     refresh_tray(&app, Instant::now());
 }
 
@@ -1488,8 +1413,8 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .default_window_icon()
         .cloned()
         .ok_or_else(|| tauri::Error::AssetNotFound("默认窗口图标".to_string()))?;
-    let tray_base = build_tray_badge_icon(&default_icon);
-    let tray_icons = build_tray_icons(&tray_base);
+    // 直接使用应用图标（图形已在 SVG 中放大 1.7 倍），不再叠加托盘专用描边。
+    let tray_icons = build_tray_icons(&default_icon);
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tray_icons.idle[0].clone())
@@ -1715,7 +1640,8 @@ fn refresh_tray(app: &tauri::AppHandle, now: Instant) {
         return;
     };
     let state = app.state::<AppState>();
-    let dnd = state.do_not_disturb.load(Ordering::Relaxed);
+    let alert_flicker = state.tray_alert_flicker.load(Ordering::Relaxed);
+    let working_breathing = state.tray_working_breathing.load(Ordering::Relaxed);
     let unread = state.tray_alert_unread.load(Ordering::Relaxed);
     let active = state.window_active.load(Ordering::Relaxed);
 
@@ -1729,32 +1655,35 @@ fn refresh_tray(app: &tauri::AppHandle, now: Instant) {
         return;
     };
 
-    // 优先级：可播放的告警动画 > 进行中呼吸 > 静态空闲
+    // 优先级：可播放的告警动画 > 进行中呼吸 > 静态空闲；
+    // 对应动效关闭时仍保留状态，只回退为静态图标。
     let has_alert = runtime.blocked + runtime.interrupted > 0;
-    let alert_animated = has_alert && unread && !dnd && !active;
-    let kind = if alert_animated {
-        TrayIconKind::Alert
+    let alert_animated = has_alert && unread && !active && alert_flicker;
+    let (display_kind, frame_count, period) = if !TRAY_ANIMATION_ENABLED {
+        (TrayIconKind::Idle, 1, Duration::ZERO)
+    } else if alert_animated {
+        (
+            TrayIconKind::Alert,
+            TRAY_ALERT_FRAME_COUNT,
+            TRAY_ALERT_PERIOD,
+        )
     } else if runtime.working > 0 {
-        TrayIconKind::Working
+        let frames = if working_breathing {
+            TRAY_WORKING_FRAME_COUNT
+        } else {
+            1
+        };
+        let period = if working_breathing {
+            TRAY_WORKING_PERIOD
+        } else {
+            Duration::ZERO
+        };
+        (TrayIconKind::Working, frames, period)
     } else {
-        TrayIconKind::Idle
-    };
-    let display_kind = if TRAY_ANIMATION_ENABLED {
-        kind
-    } else {
-        TrayIconKind::Idle
-    };
-    let (frame_count, period) = if TRAY_ANIMATION_ENABLED {
-        match display_kind {
-            TrayIconKind::Working => (TRAY_WORKING_FRAME_COUNT, TRAY_WORKING_PERIOD),
-            TrayIconKind::Alert => (TRAY_ALERT_FRAME_COUNT, TRAY_ALERT_PERIOD),
-            TrayIconKind::Idle => (1, Duration::ZERO),
-        }
-    } else {
-        (1, Duration::ZERO)
+        (TrayIconKind::Idle, 1, Duration::ZERO)
     };
 
-    // 状态切换时重新起算动画，保证告警弹跳从完整图标开始
+    // 状态切换时重新起算动画，保证告警闪烁从完整图标开始
     if runtime.last_animation_kind != Some(display_kind) {
         runtime.last_animation_kind = Some(display_kind);
         runtime.animation_started = Some(now);
@@ -1825,7 +1754,6 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
 
     let state = app.state::<AppState>();
     let active = state.window_active.load(Ordering::Relaxed);
-    let dnd = state.do_not_disturb.load(Ordering::Relaxed);
     let system_notifications = state.system_notifications.load(Ordering::Relaxed);
 
     let new_alerts: Vec<AlertItem> = {
@@ -1852,7 +1780,7 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
     let has_alert = snapshot.blocked + snapshot.interrupted > 0;
     if !has_alert {
         state.tray_alert_unread.store(false, Ordering::Relaxed);
-    } else if !*first_scan && !active && !dnd && !new_alerts.is_empty() {
+    } else if !*first_scan && !active && !new_alerts.is_empty() {
         state.tray_alert_unread.store(true, Ordering::Relaxed);
     }
 
@@ -1860,7 +1788,7 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
     // NOTE: 待处理告警的去重键带状态时间戳（见 alert_event_key），每次新的等待请求都会
     // 进入 new_alerts，即使中间的 busy 状态短于轮询周期也能识别；同一次等待不会重复弹。
     // 因此不设全局冷却——否则同一会话短时间内第二次告警会被静默丢弃。
-    if !*first_scan && system_notifications && !dnd && !active && !new_alerts.is_empty() {
+    if !*first_scan && system_notifications && !active && !new_alerts.is_empty() {
         let payload =
             notification_popup_payload(snapshot.blocked, snapshot.interrupted, &new_alerts);
         if let Err(err) = show_notification_popup(app, payload) {
@@ -2707,7 +2635,7 @@ pub fn run() {
             quit_app,
             set_close_to_tray,
             set_click_through,
-            set_notification_preferences,
+            set_activity_preferences,
             get_notification_payload,
             hide_notification_window,
             open_main_window,
@@ -3208,39 +3136,6 @@ mod tests {
             assert_eq!(corner_alpha, expected_alpha);
             assert_eq!(center_alpha, expected_alpha);
         }
-    }
-
-    #[test]
-    fn tray_badge_icon_draws_outline_and_keeps_interior_transparent() {
-        // 用透明底 + 中央不透明绿色方块模拟当前透明图标
-        let mut pixels = vec![0_u8; 32 * 32 * 4];
-        for y in 8..24 {
-            for x in 8..24 {
-                let index = ((y * 32 + x) * 4) as usize;
-                pixels[index] = 46;
-                pixels[index + 1] = 213;
-                pixels[index + 2] = 115;
-                pixels[index + 3] = 255;
-            }
-        }
-        let base = Image::new_owned(pixels, 32, 32);
-        let tray = build_tray_badge_icon(&base);
-
-        assert_eq!((tray.width(), tray.height()), (32, 32));
-        // 圆角外四角保持透明
-        assert_eq!(tray.rgba()[3], 0);
-        // 顶边中点为深绿描边
-        let border_pixel = ((16 * 32 + 1) * 4) as usize;
-        assert_eq!(
-            &tray.rgba()[border_pixel..border_pixel + 4],
-            &[4, 120, 87, 255]
-        );
-        // 描边与图形之间的内部区域不填充
-        let interior_pixel = ((4 * 32 + 16) * 4) as usize;
-        assert_eq!(tray.rgba()[interior_pixel + 3], 0);
-        // 中央图形保留原色
-        let center = ((16 * 32 + 16) * 4) as usize;
-        assert_eq!(&tray.rgba()[center..center + 4], &[46, 213, 115, 255]);
     }
 
     #[test]

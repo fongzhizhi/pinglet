@@ -23,13 +23,19 @@ describe("parseSettings", () => {
     expect(settings.theme).toBe("auto");
     expect(settings.closeToTray).toBe(true);
     expect(settings.systemNotifications).toBe(true);
-    expect(settings.doNotDisturb).toBe(false);
   });
 
-  it("should default panel effects to enabled", () => {
+  it("should default panel and tray effects to enabled", () => {
     const settings = createDefaultSettings();
 
     expect(settings.panelEffects).toEqual({ alertPulse: true, workingFlow: true });
+    expect(settings.trayEffects).toEqual({ workingBreathing: true, alertFlicker: true });
+    expect(settings.reminders).toEqual({
+      breathing: true,
+      sound: true,
+      shake: true,
+      none: false,
+    });
   });
 
   it("should keep explicit opt-outs from storage", () => {
@@ -39,6 +45,8 @@ describe("parseSettings", () => {
         closeToTray: false,
         systemNotifications: false,
         panelEffects: { alertPulse: false, workingFlow: false },
+        trayEffects: { workingBreathing: false, alertFlicker: false },
+        reminders: { breathing: false, sound: false, shake: false },
       }),
     );
 
@@ -46,27 +54,51 @@ describe("parseSettings", () => {
     expect(settings.closeToTray).toBe(false);
     expect(settings.systemNotifications).toBe(false);
     expect(settings.panelEffects).toEqual({ alertPulse: false, workingFlow: false });
+    expect(settings.trayEffects).toEqual({ workingBreathing: false, alertFlicker: false });
+    expect(settings.reminders).toEqual({
+      breathing: false,
+      sound: false,
+      shake: false,
+      none: true,
+    });
   });
 
-  it("should fall back per panel effect when values have wrong types", () => {
+  it("should fall back per effect when values have wrong types", () => {
     const settings = parseSettings(
-      JSON.stringify({ panelEffects: { alertPulse: "no", workingFlow: false } }),
+      JSON.stringify({
+        panelEffects: { alertPulse: "no", workingFlow: false },
+        trayEffects: { workingBreathing: 1, alertFlicker: false },
+      }),
     );
 
     expect(settings.panelEffects).toEqual({ alertPulse: true, workingFlow: false });
+    expect(settings.trayEffects).toEqual({ workingBreathing: true, alertFlicker: false });
+  });
+
+  it("should treat a legacy 'none' reminder selection as all reminders off", () => {
+    const settings = parseSettings(
+      JSON.stringify({
+        reminders: { breathing: false, sound: false, shake: false, none: true },
+      }),
+    );
+
+    expect(settings.reminders).toEqual({
+      breathing: false,
+      sound: false,
+      shake: false,
+      none: true,
+    });
   });
 
   it("should accept auto theme and notification preferences", () => {
     const settings = parseSettings(
       JSON.stringify({
         theme: "auto",
-        doNotDisturb: true,
         systemNotifications: false,
       }),
     );
 
     expect(settings.theme).toBe("auto");
-    expect(settings.doNotDisturb).toBe(true);
     expect(settings.systemNotifications).toBe(false);
   });
 
@@ -76,14 +108,12 @@ describe("parseSettings", () => {
     const settings = parseSettings(
       JSON.stringify({
         theme: "sepia",
-        doNotDisturb: "yes",
         systemNotifications: 1,
         transparency: null,
       }),
     );
 
     expect(settings.theme).toBe(defaults.theme);
-    expect(settings.doNotDisturb).toBe(defaults.doNotDisturb);
     expect(settings.systemNotifications).toBe(defaults.systemNotifications);
     expect(settings.transparency).toBe(defaults.transparency);
   });

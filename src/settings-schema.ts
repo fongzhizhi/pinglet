@@ -20,6 +20,11 @@ export type PanelEffectKey = "alertPulse" | "workingFlow";
 
 export type PanelEffects = Record<PanelEffectKey, boolean>;
 
+/** 托盘动效：进行中呼吸 / 异常闪烁，只在窗口隐藏或最小化时可见。 */
+export type TrayEffectKey = "workingBreathing" | "alertFlicker";
+
+export type TrayEffects = Record<TrayEffectKey, boolean>;
+
 export type Settings = {
   theme: ThemeMode;
   fontSize: FontSize;
@@ -28,13 +33,13 @@ export type Settings = {
   reminders: Reminders;
   /** 面板行持续动效；关闭后仅保留静态状态色 */
   panelEffects: PanelEffects;
+  /** 托盘动效；关闭后对应状态显示静态托盘图标 */
+  trayEffects: TrayEffects;
   closeToTray: boolean;
   clickThrough: boolean;
   autoStart: boolean;
   shortcut: string;
   pinned: boolean;
-  /** 免打扰：暂停闪烁、通知消息、音效、抖动与呼吸灯，但保留托盘告警色与计数；与 Windows 系统「请勿打扰」无关 */
-  doNotDisturb: boolean;
   /** 是否允许在窗口隐藏且出现新告警时弹出应用内通知消息 */
   systemNotifications: boolean;
 };
@@ -63,6 +68,11 @@ export const DEFAULT_PANEL_EFFECTS: PanelEffects = {
   workingFlow: true,
 };
 
+export const DEFAULT_TRAY_EFFECTS: TrayEffects = {
+  workingBreathing: true,
+  alertFlicker: true,
+};
+
 export function createDefaultSettings(): Settings {
   return {
     theme: THEME_AUTO,
@@ -70,12 +80,12 @@ export function createDefaultSettings(): Settings {
     transparency: DEFAULT_PANEL_TRANSPARENCY,
     reminders: { ...DEFAULT_REMINDERS },
     panelEffects: { ...DEFAULT_PANEL_EFFECTS },
+    trayEffects: { ...DEFAULT_TRAY_EFFECTS },
     closeToTray: true,
     clickThrough: false,
     autoStart: false,
     shortcut: DEFAULT_SHORTCUT,
     pinned: false,
-    doNotDisturb: false,
     systemNotifications: true,
   };
 }
@@ -110,24 +120,42 @@ function parsePanelEffects(value: unknown): PanelEffects {
   };
 }
 
+function parseTrayEffects(value: unknown): TrayEffects {
+  if (!isRecord(value)) {
+    return { ...DEFAULT_TRAY_EFFECTS };
+  }
+
+  return {
+    workingBreathing:
+      typeof value.workingBreathing === "boolean"
+        ? value.workingBreathing
+        : DEFAULT_TRAY_EFFECTS.workingBreathing,
+    alertFlicker:
+      typeof value.alertFlicker === "boolean"
+        ? value.alertFlicker
+        : DEFAULT_TRAY_EFFECTS.alertFlicker,
+  };
+}
+
+/**
+ * 三项提醒相互独立；`none` 是「全部关闭」的派生状态，勾选后三项必须为 false。
+ * NOTE: 兼容两类历史数据——显式写入的 `none: true`，以及三项全为 false 但缺少 `none` 的记录。
+ */
 function parseReminders(value: unknown): Reminders {
   if (!isRecord(value)) {
     return { ...DEFAULT_REMINDERS };
   }
 
-  const reminders: Reminders = {
-    breathing: value.breathing === true,
-    sound: value.sound === true,
-    shake: value.shake === true,
-    none: value.none === true,
-  };
-  if (reminders.none) {
+  const breathing =
+    typeof value.breathing === "boolean" ? value.breathing : DEFAULT_REMINDERS.breathing;
+  const sound = typeof value.sound === "boolean" ? value.sound : DEFAULT_REMINDERS.sound;
+  const shake = typeof value.shake === "boolean" ? value.shake : DEFAULT_REMINDERS.shake;
+  const none = value.none === true || (!breathing && !sound && !shake);
+  if (none) {
     return { breathing: false, sound: false, shake: false, none: true };
   }
-  if (!reminders.breathing && !reminders.sound && !reminders.shake) {
-    return { ...DEFAULT_REMINDERS };
-  }
-  return reminders;
+
+  return { breathing, sound, shake, none: false };
 }
 
 /**
@@ -165,6 +193,7 @@ export function parseSettings(raw: string | null): Settings {
           : fallback.transparency,
       reminders: parseReminders(value.reminders),
       panelEffects: parsePanelEffects(value.panelEffects),
+      trayEffects: parseTrayEffects(value.trayEffects),
       closeToTray:
         typeof value.closeToTray === "boolean" ? value.closeToTray : fallback.closeToTray,
       clickThrough:
@@ -173,8 +202,6 @@ export function parseSettings(raw: string | null): Settings {
       shortcut:
         typeof value.shortcut === "string" ? normalizeShortcut(value.shortcut) : fallback.shortcut,
       pinned: typeof value.pinned === "boolean" ? value.pinned : fallback.pinned,
-      doNotDisturb:
-        typeof value.doNotDisturb === "boolean" ? value.doNotDisturb : fallback.doNotDisturb,
       systemNotifications:
         typeof value.systemNotifications === "boolean"
           ? value.systemNotifications
