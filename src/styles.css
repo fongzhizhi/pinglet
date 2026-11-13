@@ -562,14 +562,6 @@ input {
   min-width: 0;
 }
 
-.session-meta {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 0;
-}
-
 .state-label {
   flex: none;
   width: 3em;
@@ -581,7 +573,7 @@ input {
 }
 
 .session-name {
-  flex: 1 1 auto;
+  flex: none;
   min-width: 0;
   overflow: hidden;
   font-size: calc(var(--font-size-base) * 0.96);
@@ -591,7 +583,7 @@ input {
   white-space: nowrap;
 }
 
-/* 第二行目录标签；--tag-color 由脚本按完整路径哈希分配 */
+/* 第一行目录标签；--tag-color 由脚本按完整路径哈希分配 */
 .cwd {
   --tag-color: var(--color-text-sub);
 
@@ -609,7 +601,7 @@ input {
   white-space: nowrap;
 }
 
-/* 第二行右侧入口图标：VSCode 蓝 / 终端红，只做入口识别，不参与状态语义 */
+/* 第一行入口图标：VSCode 蓝 / 终端红，只做入口识别，不参与状态语义 */
 .entry-icon {
   flex: none;
   width: calc(var(--font-size-base) * 1);
@@ -639,6 +631,7 @@ input {
 .duration {
   flex: none;
   min-width: calc(var(--font-size-base) * 3.85);
+  margin-left: auto;
   color: var(--color-text-sub);
   font-size: calc(var(--font-size-base) * 0.81);
   font-variant-numeric: tabular-nums;

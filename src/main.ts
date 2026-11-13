@@ -276,18 +276,15 @@ function createRowView(): RowView {
   const duration = document.createElement("span");
   duration.className = "duration";
 
-  // 双行布局：第一行状态与标题，第二行目录标签与右侧入口图标（入口文字只在悬浮详情中展示）
+  // 双行布局：第一行状态、目录标签、入口图标与时长，第二行标题独占整行
+  // NOTE: 目录是稳定且短的会话识别锚点，优先于 AI 生成的标题；入口文字只在悬浮详情中展示
   const mainLine = document.createElement("div");
   mainLine.className = "session-main";
-  mainLine.append(stateLabel, name, duration);
-
-  const metaLine = document.createElement("div");
-  metaLine.className = "session-meta";
-  metaLine.append(folder, entryIcon);
+  mainLine.append(stateLabel, folder, entryIcon, duration);
 
   const content = document.createElement("div");
   content.className = "session-content";
-  content.append(mainLine, metaLine);
+  content.append(mainLine, name);
 
   element.append(dot, content);
 
@@ -407,7 +404,7 @@ function updateRowView(
   view.element.classList.toggle("is-disabled", isDisabled);
   view.element.tabIndex = isDisabled ? -1 : 0;
   view.element.setAttribute("aria-disabled", String(isDisabled));
-  view.element.setAttribute("aria-label", `${meta.label}，${row.title}，${folder}`);
+  view.element.setAttribute("aria-label", `${meta.label}，${folder}，${row.title}`);
 }
 
 function renderRows(rows: SessionRow[]): void {
