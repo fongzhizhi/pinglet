@@ -9,10 +9,13 @@ use tauri::image::Image;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+use crate::AppState;
+use crate::notify::{
+    hide_notification_window, schedule_notification_from_tray, schedule_notification_hide_from_tray,
+};
 use crate::window::{
     apply_click_through, open_settings, toggle_main_window, toggle_window_visibility,
 };
-use crate::{APP_NAME, AppState};
 
 const TRAY_ID: &str = "pinglet-tray";
 const TRAY_MENU_SHOW: &str = "show";
@@ -35,19 +38,6 @@ const TRAY_ALERT_PERIOD: Duration = Duration::from_millis(1000);
 /// NOTE: Windows 会把 alpha 全为 0 的 32bpp 图标按不透明黑色绘制（RGB 为黑时就是黑方块）；
 /// 保留 1/255 才能走 alpha 混合，视觉上仍不可见。
 const TRAY_HIDDEN_ALPHA: u8 = 1;
-fn tray_tooltip(blocked: usize, interrupted: usize, working: usize) -> String {
-    let mut parts = vec![APP_NAME.to_string()];
-    if blocked > 0 {
-        parts.push(format!("{blocked} 待处理"));
-    }
-    if interrupted > 0 {
-        parts.push(format!("{interrupted} 已中断"));
-    }
-    if working > 0 {
-        parts.push(format!("{working} 进行中"));
-    }
-    parts.join(" · ")
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrayIconKind {
     Idle,
@@ -87,7 +77,7 @@ fn build_tray_icons(base: &Image<'_>) -> TrayIcons {
     }
 }
 
-/// 托盘当前展示的计数与上次写入的图标帧 / tooltip，避免每 80ms 重复设置。
+/// 托盘当前展示的计数与上次写入的图标帧，避免每 80ms 重复设置。
 pub(crate) struct TrayRuntime {
     pub(crate) blocked: usize,
     pub(crate) interrupted: usize,
@@ -96,7 +86,6 @@ pub(crate) struct TrayRuntime {
     last_icon: Option<(TrayIconKind, usize)>,
     last_animation_kind: Option<TrayIconKind>,
     animation_started: Option<Instant>,
-    last_tooltip: Option<String>,
 }
 
 impl Default for TrayRuntime {
@@ -109,7 +98,6 @@ impl Default for TrayRuntime {
             last_icon: Some((TrayIconKind::Idle, 0)),
             last_animation_kind: None,
             animation_started: None,
-            last_tooltip: Some(APP_NAME.to_string()),
         }
     }
 }
@@ -288,7 +276,6 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tray_icons.idle[0].clone())
-        .tooltip(APP_NAME)
         .show_menu_on_left_click(false)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -304,15 +291,21 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             TRAY_MENU_QUIT => app.exit(0),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| match event {
+            // 鼠标悬浮托盘时延迟展示未处理告警；快速划过不会弹出
+            TrayIconEvent::Enter { .. } => schedule_notification_from_tray(tray.app_handle()),
+            TrayIconEvent::Leave { .. } => {
+                schedule_notification_hide_from_tray(tray.app_handle());
+            }
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            } => {
+                hide_notification_window(tray.app_handle().clone());
                 toggle_main_window(tray.app_handle());
             }
+            _ => {}
         })
         .build(app)?;
 
@@ -342,7 +335,7 @@ pub(crate) fn sync_show_item(state: &AppState, visible: bool) {
         eprintln!("pinglet: 同步托盘显示勾选状态失败: {err}");
     }
 }
-/// 根据当前计数与动画相位更新托盘图标帧与 tooltip，只在内容变化时写入。
+/// 根据当前计数与动画相位更新托盘图标帧，只在内容变化时写入。
 pub(crate) fn refresh_tray(app: &tauri::AppHandle, now: Instant) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
@@ -410,30 +403,12 @@ pub(crate) fn refresh_tray(app: &tauri::AppHandle, now: Instant) {
             Err(err) => eprintln!("pinglet: 更新托盘图标失败: {err}"),
         }
     }
-
-    let tooltip = tray_tooltip(runtime.blocked, runtime.interrupted, runtime.working);
-    if runtime.last_tooltip.as_deref() != Some(tooltip.as_str()) {
-        match tray.set_tooltip(Some(tooltip.as_str())) {
-            Ok(()) => runtime.last_tooltip = Some(tooltip),
-            Err(err) => eprintln!("pinglet: 更新托盘提示失败: {err}"),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn tooltip_omits_zero_counts() {
-        assert_eq!(tray_tooltip(0, 0, 0), "Pinglet");
-        assert_eq!(tray_tooltip(1, 0, 2), "Pinglet · 1 待处理 · 2 进行中");
-        assert_eq!(tray_tooltip(0, 3, 0), "Pinglet · 3 已中断");
-        assert_eq!(
-            tray_tooltip(2, 3, 4),
-            "Pinglet · 2 待处理 · 3 已中断 · 4 进行中"
-        );
-    }
     #[test]
     fn tray_icon_frames_keep_canvas_size_and_alpha_range() {
         let base = Image::new_owned(vec![255_u8; 20 * 20 * 4], 20, 20);

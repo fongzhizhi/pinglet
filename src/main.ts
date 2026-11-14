@@ -3,6 +3,7 @@
  * Pinglet 看板前端入口：轮询 Rust 侧的 list_sessions，并按四态渲染、提醒与窗口行为。
  */
 import { scheduleAutoThemeSample, startAutoTheme, stopAutoTheme } from "./auto-theme";
+import { CLI_ICON_SVG, VSCODE_ICON_SVG } from "./entry-icons";
 import { assignFolderColorSlots, folderColorKey, folderTagColor } from "./folder-colors";
 import { resolveHeartbeatLevel, type HeartbeatLevel } from "./heartbeat";
 import { detectReminderEvent, type AbnormalState } from "./reminder-state";
@@ -119,12 +120,6 @@ const PANEL_ANIMATION_SETTLE_MS = 40;
 const PREFERS_REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 const STATE_CLASSES = BOARD_STATES.map((state) => STATE_META[state].className);
-
-// 第二行右侧的入口图标：VSCode 蓝 / 终端红用于区分入口，入口文字仍在悬浮详情中展示
-const VSCODE_ICON_SVG =
-  '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>';
-const CLI_ICON_SVG =
-  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="4.2" fill="none" stroke="currentColor" stroke-width="3.6"/><path fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" d="M6.6 8.2 10.3 11.8 6.6 15.4M12.9 15.4h5.9"/></svg>';
 
 // 无边框窗口的 8 个缩放方向，名称与 Tauri ResizeDirection 一致
 const RESIZE_DIRECTIONS: ReadonlySet<ResizeDirection> = new Set([

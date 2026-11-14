@@ -5,6 +5,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use tauri::menu::CheckMenuItem;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
@@ -22,6 +23,7 @@ mod window;
 
 use crate::monitor::spawn_session_monitor;
 use crate::notify::NotificationPopupPayload;
+use crate::session::AlertItem;
 use crate::tray::{TrayIcons, TrayRuntime, create_tray};
 use crate::window::{
     SnapEdges, clamp_window_into_work_area, position_window_top_right, show_main_window,
@@ -35,7 +37,7 @@ const EVENT_WINDOW_MOVED: &str = "pinglet://window-moved";
 const EVENT_WINDOW_HIDE_REQUEST: &str = "pinglet://window-hide-request";
 const EVENT_WINDOW_SHOW_REQUEST: &str = "pinglet://window-show-request";
 const EVENT_NOTIFICATION_SHOW: &str = "pinglet://notification-show";
-/// 应用显示名：托盘 tooltip 与通知弹窗标题共用。
+/// 应用显示名：通知弹窗标题使用。
 const APP_NAME: &str = "Pinglet";
 /// 与 tauri-plugin-window-state 的默认文件名一致，用于判断是否已有可恢复的位置。
 const WINDOW_STATE_FILENAME: &str = tauri_plugin_window_state::DEFAULT_FILENAME;
@@ -58,6 +60,14 @@ struct AppState {
     tray_runtime: Mutex<TrayRuntime>,
     tray_icons: Mutex<Option<TrayIcons>>,
     notification_payload: Mutex<Option<NotificationPopupPayload>>,
+    /// 最近一轮采集的全部告警，供鼠标悬浮托盘时重新展示通知列表。
+    latest_alerts: Mutex<Vec<AlertItem>>,
+    /// 当前通知窗口是否由托盘悬浮显示；用于鼠标快速进出时避免重复渲染。
+    notification_tray_visible: AtomicBool,
+    /// 通知窗口最近一次显示的时间，保证悬浮卡片有最短可读时长。
+    notification_shown_at: Mutex<Option<Instant>>,
+    /// 鼠标是否停在通知弹窗上；离开托盘后的延迟隐藏要避开正在查看的弹窗。
+    notification_hovered: AtomicBool,
     /// 每次显示 / 主动隐藏都递增，作废旧的自绘弹窗兜底隐藏计时。
     notification_generation: AtomicU64,
     /// 主窗口隐藏请求代号：显示或新的隐藏请求都会递增，使旧的延迟隐藏失效。
@@ -84,6 +94,10 @@ impl Default for AppState {
             tray_runtime: Mutex::new(TrayRuntime::default()),
             tray_icons: Mutex::new(None),
             notification_payload: Mutex::new(None),
+            latest_alerts: Mutex::new(Vec::new()),
+            notification_tray_visible: AtomicBool::new(false),
+            notification_shown_at: Mutex::new(None),
+            notification_hovered: AtomicBool::new(false),
             notification_generation: AtomicU64::new(0),
             window_hide_generation: AtomicU64::new(0),
             monitor_stop: AtomicBool::new(false),
@@ -188,6 +202,8 @@ pub fn run() {
             notify::get_notification_payload,
             notify::hide_notification_window,
             notify::open_main_window,
+            notify::set_notification_hover,
+            notify::schedule_notification_hide,
             window::hide_main_window_now,
             notify::resize_notification_window,
             window::reset_window_position,

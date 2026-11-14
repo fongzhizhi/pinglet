@@ -74,10 +74,16 @@ impl BoardKind {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct AlertItem {
     pub(crate) key: String,
     pub(crate) title: String,
     pub(crate) kind: BoardKind,
+    /// 通知卡片点击激活所需字段；只在本地 IPC 中使用，不在通知内容里展示。
+    pub(crate) cwd: Option<String>,
+    pub(crate) entrypoint: Option<String>,
+    pub(crate) name: String,
+    pub(crate) pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -133,6 +139,10 @@ pub(crate) fn build_snapshot(rows: &[SessionRow]) -> SessionSnapshot {
                 key,
                 title: row.title.clone(),
                 kind,
+                cwd: row.cwd.clone(),
+                entrypoint: row.entrypoint.clone(),
+                name: row.name.clone(),
+                pid: row.pid,
             });
         }
     }

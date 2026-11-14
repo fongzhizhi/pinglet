@@ -59,6 +59,11 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
     let active = state.window_active.load(Ordering::Relaxed);
     let system_notifications = state.system_notifications.load(Ordering::Relaxed);
 
+    // 保存本轮全部告警，鼠标悬浮托盘时直接复用，不再依赖「仅新增」的弹窗路径
+    if let Ok(mut latest) = state.latest_alerts.lock() {
+        *latest = snapshot.alert_items.clone();
+    }
+
     let new_alerts: Vec<AlertItem> = {
         let Ok(mut runtime) = state.tray_runtime.lock() else {
             return;
@@ -67,11 +72,7 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
             .alert_items
             .iter()
             .filter(|item| !runtime.alert_keys.contains(&item.key))
-            .map(|item| AlertItem {
-                key: item.key.clone(),
-                title: item.title.clone(),
-                kind: item.kind,
-            })
+            .cloned()
             .collect();
         runtime.blocked = snapshot.blocked;
         runtime.interrupted = snapshot.interrupted;
@@ -92,8 +93,7 @@ fn poll_session_state(app: &tauri::AppHandle, snapshot: SessionSnapshot, first_s
     // 进入 new_alerts，即使中间的 busy 状态短于轮询周期也能识别；同一次等待不会重复弹。
     // 因此不设全局冷却——否则同一会话短时间内第二次告警会被静默丢弃。
     if !*first_scan && system_notifications && !active && !new_alerts.is_empty() {
-        let payload =
-            notification_popup_payload(snapshot.blocked, snapshot.interrupted, &new_alerts);
+        let payload = notification_popup_payload(&new_alerts, true);
         if let Err(err) = show_notification_popup(app, payload) {
             eprintln!("pinglet: 显示通知弹窗失败: {err}");
         }

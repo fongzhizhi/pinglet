@@ -8,6 +8,7 @@ use tauri_plugin_window_state::{AppHandleExt as WindowStateAppHandleExt, StateFl
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Graphics::Gdi::{CLR_INVALID, GetDC, GetPixel, ReleaseDC};
 
+use crate::notify::hide_notification_window;
 use crate::tray::{refresh_tray, sync_show_item};
 use crate::{
     AppState, EVENT_WINDOW_HIDE_REQUEST, EVENT_WINDOW_SHOW_REQUEST, EVENT_WINDOW_VISIBILITY,
@@ -231,6 +232,8 @@ fn request_hide_main_window(app: &tauri::AppHandle) {
 
 /// 显示并聚焦主窗口：穿透状态下恢复可点击，最小化时先还原。
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    // 主窗口出现后通知弹窗没有继续停留的必要，避免悬浮托盘时留下的卡片遮住面板
+    hide_notification_window(app.clone());
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };

@@ -1,7 +1,7 @@
 //! 自绘通知弹窗：内容聚合、窗口创建、定位与显示隐藏。
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -12,47 +12,50 @@ use crate::session::{AlertItem, BoardKind};
 use crate::window::show_main_window;
 use crate::{APP_NAME, AppState, EVENT_NOTIFICATION_SHOW, NOTIFICATION_WINDOW_LABEL};
 
-/// 通知弹窗单条最多列举数与标题截断长度，避免内容过长。
-const NOTIFICATION_MAX_ITEMS: usize = 3;
+/// 通知弹窗最多列举数与标题截断长度，避免内容过长。
+const NOTIFICATION_MAX_ITEMS: usize = 6;
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 24;
 /// 自绘通知弹窗：固定宽度（逻辑像素）、内容高度上下限、右下角边距与前端淡出后的兜底隐藏时长。
-const NOTIFICATION_WINDOW_WIDTH_LOGICAL: f64 = 380.0;
+const NOTIFICATION_WINDOW_WIDTH_LOGICAL: f64 = 300.0;
 const NOTIFICATION_WINDOW_MIN_HEIGHT_LOGICAL: f64 = 96.0;
-const NOTIFICATION_WINDOW_HEIGHT_LOGICAL: f64 = 176.0;
-const NOTIFICATION_WINDOW_MARGIN_LOGICAL: f64 = 16.0;
+const NOTIFICATION_WINDOW_HEIGHT_LOGICAL: f64 = 480.0;
+/// 底部距任务栏的间隙；工作区已排除任务栏，这里只留一点视觉呼吸空间。
+const NOTIFICATION_WINDOW_MARGIN_LOGICAL: f64 = 6.0;
 const NOTIFICATION_AUTO_HIDE_FALLBACK: Duration = Duration::from_secs(8);
-/// 通知弹窗中的一条告警；kind 决定状态文案的颜色。
+/// 鼠标离开托盘或通知弹窗后延迟隐藏：只留出从托盘移到卡片上的缓冲，接近系统 tooltip 的手感。
+const NOTIFICATION_HOVER_HIDE_DELAY: Duration = Duration::from_millis(250);
+/// 悬浮托盘停留多久才展示通知，避免鼠标无意划过时误触发。
+const NOTIFICATION_HOVER_SHOW_DELAY: Duration = Duration::from_millis(600);
+/// 悬浮卡片的最长展示时长，防止 Enter / Leave 事件丢失后卡片一直不消失。
+const NOTIFICATION_MAX_VISIBLE: Duration = Duration::from_secs(12);
+
+/// 通知弹窗中的一条告警；每条独立成卡。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NotificationPopupItem {
+    key: String,
     title: String,
     kind: &'static str,
     status: &'static str,
+    /// 点击卡片时激活会话所需字段；仅用于本地 IPC，不在卡片上展示。
+    cwd: Option<String>,
+    entrypoint: Option<String>,
+    name: String,
+    pid: Option<u32>,
 }
 
-/// 通知弹窗内容：标题汇总 + 最多三条明细 + 剩余数量。
+/// 通知弹窗内容：独立卡片列表 + 剩余数量 + 是否自动隐藏。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NotificationPopupPayload {
-    title: String,
     items: Vec<NotificationPopupItem>,
     more: Option<String>,
-}
-fn notification_title(blocked: usize, interrupted: usize) -> String {
-    let total = blocked + interrupted;
-    if interrupted == 0 {
-        format!("{APP_NAME} · {total} 个会话待处理")
-    } else if blocked == 0 {
-        format!("{APP_NAME} · {total} 个会话已中断")
-    } else {
-        format!("{APP_NAME} · {total} 个会话需要关注")
-    }
+    auto_hide: bool,
 }
 
 pub(crate) fn notification_popup_payload(
-    blocked: usize,
-    interrupted: usize,
     items: &[AlertItem],
+    auto_hide: bool,
 ) -> NotificationPopupPayload {
     let total = items.len();
     let rows = items
@@ -61,19 +64,24 @@ pub(crate) fn notification_popup_payload(
         .map(|item| {
             let (kind, status) = match item.kind {
                 BoardKind::Interrupted => ("interrupted", "已中断"),
-                _ => ("blocked", "等待确认"),
+                _ => ("blocked", "待处理"),
             };
             NotificationPopupItem {
+                key: item.key.clone(),
                 title: truncate_notification_title(&item.title),
                 kind,
                 status,
+                cwd: item.cwd.clone(),
+                entrypoint: item.entrypoint.clone(),
+                name: item.name.clone(),
+                pid: item.pid,
             }
         })
         .collect();
     NotificationPopupPayload {
-        title: notification_title(blocked, interrupted),
         items: rows,
         more: (total > NOTIFICATION_MAX_ITEMS).then(|| format!("等 {total} 个会话")),
+        auto_hide,
     }
 }
 
@@ -266,6 +274,7 @@ pub(crate) fn show_notification_popup(
     app: &tauri::AppHandle,
     payload: NotificationPopupPayload,
 ) -> Result<(), String> {
+    let auto_hide = payload.auto_hide;
     {
         let state = app.state::<AppState>();
         let mut slot = state
@@ -273,6 +282,13 @@ pub(crate) fn show_notification_popup(
             .lock()
             .map_err(|_| "通知内容锁不可用".to_string())?;
         *slot = Some(payload);
+        drop(slot);
+        state
+            .notification_tray_visible
+            .store(false, Ordering::Relaxed);
+        if let Ok(mut shown_at) = state.notification_shown_at.lock() {
+            *shown_at = Some(Instant::now());
+        }
     }
 
     let window = ensure_notification_window(app)?;
@@ -282,12 +298,116 @@ pub(crate) fn show_notification_popup(
     if let Err(err) = window.emit(EVENT_NOTIFICATION_SHOW, ()) {
         eprintln!("pinglet: 广播通知内容失败: {err}");
     }
-    schedule_notification_auto_hide(app);
+    if auto_hide {
+        // 悬浮查看时同样不强制隐藏，鼠标离开后由前端重新触发延迟隐藏
+        schedule_notification_hide_after(app, NOTIFICATION_AUTO_HIDE_FALLBACK, true);
+    }
     Ok(())
 }
 
-/// 兜底隐藏：前端 5 秒淡出未生效时，8 秒后由 Rust 收起；再次弹窗会作废旧计时。
-fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
+/// 鼠标进入托盘：延迟展示，快速划过不弹出；期间离开会取消本次展示。
+pub(crate) fn schedule_notification_from_tray(app: &tauri::AppHandle) {
+    let generation = app
+        .state::<AppState>()
+        .notification_generation
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    let thread_app = app.clone();
+    let result = std::thread::Builder::new()
+        .name("pinglet-notification-show".to_string())
+        .spawn(move || {
+            std::thread::sleep(NOTIFICATION_HOVER_SHOW_DELAY);
+            let state = thread_app.state::<AppState>();
+            if state.notification_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            show_notification_from_tray_now(&thread_app);
+        });
+    if let Err(err) = result {
+        eprintln!("pinglet: 启动通知展示计时失败: {err}");
+    }
+}
+
+/// 展示当前全部未处理告警。
+/// 只在主面板隐藏或最小化、通知消息开启且确有告警时显示，避免与面板内状态重复。
+fn show_notification_from_tray_now(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if !state.system_notifications.load(Ordering::Relaxed) {
+        return;
+    }
+    if state.window_active.load(Ordering::Relaxed) {
+        return;
+    }
+    let items = state
+        .latest_alerts
+        .lock()
+        .map(|alerts| alerts.clone())
+        .unwrap_or_default();
+    if items.is_empty() {
+        return;
+    }
+
+    // 卡片已在显示：鼠标快速移出又移入时只取消隐藏计时，不重绘，避免一闪而过
+    if state.notification_tray_visible.load(Ordering::Relaxed) {
+        state
+            .notification_generation
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let payload = notification_popup_payload(&items, false);
+    match show_notification_popup(app, payload) {
+        Ok(()) => {
+            state
+                .notification_tray_visible
+                .store(true, Ordering::Relaxed);
+            schedule_notification_max_visible(app);
+        }
+        Err(err) => eprintln!("pinglet: 显示托盘通知失败: {err}"),
+    }
+}
+
+/// 悬浮卡片最长展示兜底：即使鼠标一直停在托盘上或事件丢失，到时也会收起。
+fn schedule_notification_max_visible(app: &tauri::AppHandle) {
+    let thread_app = app.clone();
+    let result = std::thread::Builder::new()
+        .name("pinglet-notification-max-visible".to_string())
+        .spawn(move || {
+            std::thread::sleep(NOTIFICATION_MAX_VISIBLE);
+            let state = thread_app.state::<AppState>();
+            let stale = state
+                .notification_shown_at
+                .lock()
+                .ok()
+                .and_then(|shown_at| *shown_at)
+                .is_none_or(|shown_at| shown_at.elapsed() >= NOTIFICATION_MAX_VISIBLE);
+            if !stale || !state.notification_tray_visible.load(Ordering::Relaxed) {
+                return;
+            }
+            state
+                .notification_generation
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
+                && let Err(err) = hide_notification_window_raw(&window)
+            {
+                eprintln!("pinglet: 强制隐藏通知弹窗失败: {err}");
+            }
+            state.notification_hovered.store(false, Ordering::Relaxed);
+            state
+                .notification_tray_visible
+                .store(false, Ordering::Relaxed);
+        });
+    if let Err(err) = result {
+        eprintln!("pinglet: 启动通知最长展示计时失败: {err}");
+    }
+}
+
+/// 托盘或弹窗鼠标离开后延迟隐藏；期间鼠标重新进入会递增代号取消本次计时。
+pub(crate) fn schedule_notification_hide_after(
+    app: &tauri::AppHandle,
+    delay: Duration,
+    respect_hover: bool,
+) {
     let generation = app
         .state::<AppState>()
         .notification_generation
@@ -297,13 +417,12 @@ fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
     let result = std::thread::Builder::new()
         .name("pinglet-notification-hide".to_string())
         .spawn(move || {
-            std::thread::sleep(NOTIFICATION_AUTO_HIDE_FALLBACK);
-            if thread_app
-                .state::<AppState>()
-                .notification_generation
-                .load(Ordering::Relaxed)
-                != generation
-            {
+            std::thread::sleep(delay);
+            let state = thread_app.state::<AppState>();
+            if state.notification_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if respect_hover && state.notification_hovered.load(Ordering::Relaxed) {
                 return;
             }
             if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
@@ -311,10 +430,36 @@ fn schedule_notification_auto_hide(app: &tauri::AppHandle) {
             {
                 eprintln!("pinglet: 自动隐藏通知弹窗失败: {err}");
             }
+            state.notification_hovered.store(false, Ordering::Relaxed);
+            state
+                .notification_tray_visible
+                .store(false, Ordering::Relaxed);
         });
     if let Err(err) = result {
         eprintln!("pinglet: 启动通知隐藏计时失败: {err}");
     }
+}
+
+/// 托盘鼠标离开：短暂缓冲后隐藏；鼠标重新移入会取消本次隐藏。
+pub(crate) fn schedule_notification_hide_from_tray(app: &tauri::AppHandle) {
+    schedule_notification_hide_after(app, NOTIFICATION_HOVER_HIDE_DELAY, true);
+}
+
+/// 前端上报鼠标是否停在通知弹窗上；进入时立即取消尚未触发的延迟隐藏。
+#[tauri::command]
+pub fn set_notification_hover(state: tauri::State<'_, AppState>, hovered: bool) {
+    state.notification_hovered.store(hovered, Ordering::Relaxed);
+    if hovered {
+        state
+            .notification_generation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 弹窗鼠标离开后的延迟隐藏入口。
+#[tauri::command]
+pub fn schedule_notification_hide(app: tauri::AppHandle) {
+    schedule_notification_hide_after(&app, NOTIFICATION_HOVER_HIDE_DELAY, true);
 }
 
 /// 通知弹窗加载时读取最新内容；窗口复用时通过事件触发重新读取。
@@ -332,9 +477,14 @@ pub fn get_notification_payload(
 /// 前端点击关闭或倒计时结束后调用；递增代号让 Rust 兜底计时提前失效。
 #[tauri::command]
 pub fn hide_notification_window(app: tauri::AppHandle) {
-    app.state::<AppState>()
+    let state = app.state::<AppState>();
+    state
         .notification_generation
         .fetch_add(1, Ordering::Relaxed);
+    state.notification_hovered.store(false, Ordering::Relaxed);
+    state
+        .notification_tray_visible
+        .store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
         && let Err(err) = hide_notification_window_raw(&window)
     {
@@ -379,54 +529,76 @@ pub fn resize_notification_window(app: tauri::AppHandle, height: f64) -> Result<
 mod tests {
     use super::*;
 
-    #[test]
-    fn notification_title_describes_alert_kinds() {
-        assert_eq!(notification_title(2, 0), "Pinglet · 2 个会话待处理");
-        assert_eq!(notification_title(0, 3), "Pinglet · 3 个会话已中断");
-        assert_eq!(notification_title(1, 2), "Pinglet · 3 个会话需要关注");
+    fn alert(index: usize, title: String, kind: BoardKind) -> AlertItem {
+        AlertItem {
+            key: format!("pid:{index}"),
+            title,
+            kind,
+            cwd: Some(format!("C:\\work\\demo{index}")),
+            entrypoint: Some("vscode".to_string()),
+            name: format!("demo{index}"),
+            pid: Some(index as u32),
+        }
     }
 
     #[test]
     fn notification_popup_limits_and_truncates_items() {
         let long_title = "很".repeat(NOTIFICATION_TITLE_MAX_CHARS + 5);
-        let items: Vec<AlertItem> = (0..5)
-            .map(|index| AlertItem {
-                key: format!("pid:{index}"),
-                title: if index == 0 {
-                    long_title.clone()
-                } else {
-                    format!("会话{index}")
-                },
-                kind: if index % 2 == 0 {
-                    BoardKind::Blocked
-                } else {
-                    BoardKind::Interrupted
-                },
+        let items: Vec<AlertItem> = (0..8)
+            .map(|index| {
+                alert(
+                    index,
+                    if index == 0 {
+                        long_title.clone()
+                    } else {
+                        format!("会话{index}")
+                    },
+                    if index % 2 == 0 {
+                        BoardKind::Blocked
+                    } else {
+                        BoardKind::Interrupted
+                    },
+                )
             })
             .collect();
 
-        let payload = notification_popup_payload(3, 2, &items);
-        assert_eq!(payload.title, "Pinglet · 5 个会话需要关注");
+        let payload = notification_popup_payload(&items, true);
         assert_eq!(payload.items.len(), NOTIFICATION_MAX_ITEMS);
         assert!(payload.items[0].title.ends_with('…'));
         assert_eq!(payload.items[0].kind, "blocked");
-        assert_eq!(payload.items[0].status, "等待确认");
+        assert_eq!(payload.items[0].status, "待处理");
         assert_eq!(payload.items[1].kind, "interrupted");
         assert_eq!(payload.items[1].status, "已中断");
-        assert_eq!(payload.more.as_deref(), Some("等 5 个会话"));
-        // 只列举前 3 条
-        assert!(payload.items.iter().all(|item| item.title != "会话4"));
+        assert_eq!(payload.more.as_deref(), Some("等 8 个会话"));
+        assert!(payload.auto_hide);
+        // 每条卡片都携带点击激活所需字段
+        assert_eq!(payload.items[0].cwd.as_deref(), Some("C:\\work\\demo0"));
+        assert_eq!(payload.items[0].pid, Some(0));
+        assert_eq!(payload.items[0].name, "demo0");
+        assert!(payload.items.iter().all(|item| item.title != "会话7"));
+    }
+
+    #[test]
+    fn tray_popup_keeps_all_items_and_skips_auto_hide() {
+        let items: Vec<AlertItem> = (0..2)
+            .map(|index| alert(index, format!("会话{index}"), BoardKind::Blocked))
+            .collect();
+
+        let payload = notification_popup_payload(&items, false);
+        assert_eq!(payload.items.len(), 2);
+        assert!(payload.more.is_none());
+        assert!(!payload.auto_hide);
     }
 
     #[test]
     fn notification_position_sticks_to_work_area_corner() {
         assert_eq!(
-            resolve_notification_position(0, 0, 1920, 1040, 380, 176, 16),
-            (1524, 848)
+            resolve_notification_position(0, 0, 1920, 1040, 380, 176, 6),
+            (1534, 858)
         );
         // 工作区比窗口还小时退回左上角
         assert_eq!(
-            resolve_notification_position(100, 50, 300, 100, 380, 176, 16),
+            resolve_notification_position(100, 50, 300, 100, 380, 176, 6),
             (100, 50)
         );
     }

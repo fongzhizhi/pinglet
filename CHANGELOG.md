@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-15
+
 ### Added
 
 - CI 纳入 `cargo clippy -- -D warnings`，并新增版本号一致性校验（`npm run check:versions`）；Release 的 `verify` job 在构建前运行全部检查。
@@ -11,16 +13,21 @@
 - Dependabot 每周检查 npm / cargo / GitHub Actions 依赖；新增 `rust-toolchain.toml`（Rust 1.99.1 + clippy / rustfmt）与 `.nvmrc`（Node 22）。
 - NSIS 安装包补充 publisher / copyright / category / 中英双语等元数据。
 - 设置面板新增「托盘动效」开关，可关闭托盘图标的呼吸 / 闪烁动画并退回静态三态。
+- 通知消息改为每条告警独立成卡（最多 6 条），点击卡片直接激活对应 VSCode / 终端窗口，无需展开主面板。
+- 鼠标悬浮托盘图标时展示当前全部未处理告警，移开托盘或卡片后自动收起。
 
 ### Changed
 
+- 通知弹窗改为紧贴任务栏上方，视觉间距由约 26px 缩小到约 6px；卡片复用会话列表的两行结构（状态灯 / 状态 / 目录标签 / 入口图标 + 标题），目录标签使用同一套哈希配色。
 - 会话行布局调整：目录标签与入口图标移到第一行（状态之后、时间之前），标题独占第二行以获得更完整的展示宽度；目录作为稳定的会话识别锚点优先于 AI 生成的标题。
+- 入口图标缩小到 `0.8em`，CLI 图标重绘为满框描边并加粗线宽，与 VSCode 图标的视觉重量对齐。
 - Rust 后端按职责拆分 `lib.rs` 为 `activation` / `monitor` / `notify` / `session` / `settings` / `title` / `tray` / `window` 模块，测试随代码迁移。
 - 前端从 `main.ts` 抽取目录配色、提醒判定、心跳等级、窗口尺寸四组纯逻辑模块，并补齐 Vitest 覆盖。
 - 设置面板按使用场景重组分组，减少同类选项分散。
 
 ### Fixed
 
+- 入口图标改为 VSCode / CLI 各自持有固定节点与固定颜色，修复行复用与鼠标移动时 CLI 图标可能残留蓝色的问题。
 - 标题缓存与 transcript 未命中缓存按当前活跃 `sessionId` 裁剪，修复长期运行内存只增不减。
 - 窗口尺寸存档拒绝 `NaN` / `Infinity`，避免异常存档导致窗口尺寸失效。
 - 修正 NSIS 打包脚本参数。
