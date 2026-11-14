@@ -604,10 +604,9 @@ input {
 /* 第一行入口图标：VSCode 蓝 / 终端红，只做入口识别，不参与状态语义 */
 .entry-icon {
   flex: none;
-  width: calc(var(--font-size-base) * 1);
-  height: calc(var(--font-size-base) * 1);
+  width: calc(var(--font-size-base) * 0.8);
+  height: calc(var(--font-size-base) * 0.8);
   color: var(--color-text-sub);
-  opacity: 0.9;
 }
 
 .entry-icon[data-kind="vs-code"] {

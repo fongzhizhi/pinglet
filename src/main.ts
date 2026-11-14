@@ -124,7 +124,7 @@ const STATE_CLASSES = BOARD_STATES.map((state) => STATE_META[state].className);
 const VSCODE_ICON_SVG =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>';
 const CLI_ICON_SVG =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.2" y="2" width="13.6" height="12" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M4.2 5.4 6.8 7.8l-2.6 2.4M8.4 10.2h4.4"/></svg>';
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="4.2" fill="none" stroke="currentColor" stroke-width="3.6"/><path fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" d="M6.6 8.2 10.3 11.8 6.6 15.4M12.9 15.4h5.9"/></svg>';
 
 // 无边框窗口的 8 个缩放方向，名称与 Tauri ResizeDirection 一致
 const RESIZE_DIRECTIONS: ReadonlySet<ResizeDirection> = new Set([
@@ -151,7 +151,8 @@ type RowView = {
   stateLabel: HTMLSpanElement;
   name: HTMLSpanElement;
   folder: HTMLSpanElement;
-  entryIcon: HTMLSpanElement;
+  vscodeIcon: HTMLSpanElement;
+  cliIcon: HTMLSpanElement;
   duration: HTMLSpanElement;
 };
 
@@ -268,10 +269,21 @@ function createRowView(): RowView {
   const folder = document.createElement("span");
   folder.className = "cwd";
 
-  const entryIcon = document.createElement("span");
-  entryIcon.className = "entry-icon";
-  entryIcon.setAttribute("aria-hidden", "true");
-  entryIcon.hidden = true;
+  // NOTE: 两种入口图标各自持有固定节点与固定颜色，行复用时只切换 hidden。
+  // 不在运行期替换 innerHTML / 切换 color，避免 WebView2 复用旧合成层纹理导致颜色残留。
+  const vscodeIcon = document.createElement("span");
+  vscodeIcon.className = "entry-icon";
+  vscodeIcon.dataset.kind = "vs-code";
+  vscodeIcon.setAttribute("aria-hidden", "true");
+  vscodeIcon.innerHTML = VSCODE_ICON_SVG;
+  vscodeIcon.hidden = true;
+
+  const cliIcon = document.createElement("span");
+  cliIcon.className = "entry-icon";
+  cliIcon.dataset.kind = "cli";
+  cliIcon.setAttribute("aria-hidden", "true");
+  cliIcon.innerHTML = CLI_ICON_SVG;
+  cliIcon.hidden = true;
 
   const duration = document.createElement("span");
   duration.className = "duration";
@@ -280,7 +292,7 @@ function createRowView(): RowView {
   // NOTE: 目录是稳定且短的会话识别锚点，优先于 AI 生成的标题；入口文字只在悬浮详情中展示
   const mainLine = document.createElement("div");
   mainLine.className = "session-main";
-  mainLine.append(stateLabel, folder, entryIcon, duration);
+  mainLine.append(stateLabel, folder, vscodeIcon, cliIcon, duration);
 
   const content = document.createElement("div");
   content.className = "session-content";
@@ -353,7 +365,8 @@ function createRowView(): RowView {
     stateLabel,
     name,
     folder,
-    entryIcon,
+    vscodeIcon,
+    cliIcon,
     duration,
   };
 }
@@ -387,16 +400,8 @@ function updateRowView(
 
   const entrypoint = entrypointLabel(row.entrypoint);
   const iconKind = entrypoint === "vs-code" || entrypoint === "cli" ? entrypoint : null;
-  if (iconKind === null) {
-    view.entryIcon.hidden = true;
-  } else {
-    if (view.entryIcon.dataset.kind !== iconKind) {
-      view.entryIcon.dataset.kind = iconKind;
-      // NOTE: 图标为静态 SVG 常量，不包含任何会话数据
-      view.entryIcon.innerHTML = iconKind === "vs-code" ? VSCODE_ICON_SVG : CLI_ICON_SVG;
-    }
-    view.entryIcon.hidden = false;
-  }
+  view.vscodeIcon.hidden = iconKind !== "vs-code";
+  view.cliIcon.hidden = iconKind !== "cli";
 
   view.duration.textContent = describeDuration(row, state, now);
 
