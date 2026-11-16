@@ -241,6 +241,97 @@ export function directoryName(path: string | null): string {
   return segments[segments.length - 1] ?? path;
 }
 
+/**
+ * 计算目录标签：同名目录逐级补上父级前缀（如 `github/pinglet`），直到能区分或已到盘符根。
+ * 同一目录的不同路径写法（盘符大小写、分隔符）与多个会话共用标记，不参与区分；
+ * 仍无法区分时保留最长标签。
+ */
+export function directoryLabels(paths: (string | null)[]): Map<string, string> {
+  const originalsByKey = new Map<string, string[]>();
+  const segmentsByKey = new Map<string, string[]>();
+  for (const path of paths) {
+    if (path === null || path.trim() === "") {
+      continue;
+    }
+    const key = directoryKey(path);
+    const originals = originalsByKey.get(key);
+    if (originals === undefined) {
+      originalsByKey.set(key, [path]);
+      segmentsByKey.set(key, directoryPathSegments(path));
+    } else if (!originals.includes(path)) {
+      originals.push(path);
+    }
+  }
+
+  const keys = [...originalsByKey.keys()];
+  const labelsByKey = new Map<string, string>();
+  const depths = new Map<string, number>();
+  for (const key of keys) {
+    labelsByKey.set(key, directoryName(originalsByKey.get(key)?.[0] ?? null));
+    depths.set(key, 1);
+  }
+
+  for (;;) {
+    const groups = new Map<string, string[]>();
+    for (const key of keys) {
+      const label = labelsByKey.get(key) ?? "";
+      const group = groups.get(label);
+      if (group === undefined) {
+        groups.set(label, [key]);
+      } else {
+        group.push(key);
+      }
+    }
+
+    let grew = false;
+    for (const group of groups.values()) {
+      if (group.length <= 1) {
+        continue;
+      }
+      for (const key of group) {
+        const depth = depths.get(key) ?? 1;
+        const segments = segmentsByKey.get(key) ?? [];
+        const nextDepth = Math.min(depth + 1, segments.length);
+        if (nextDepth <= depth) {
+          continue;
+        }
+        depths.set(key, nextDepth);
+        labelsByKey.set(key, segments.slice(-nextDepth).join("/"));
+        grew = true;
+      }
+    }
+    if (!grew) {
+      break;
+    }
+  }
+
+  const labels = new Map<string, string>();
+  for (const [key, originals] of originalsByKey) {
+    const label = labelsByKey.get(key) ?? directoryName(originals[0] ?? null);
+    for (const original of originals) {
+      labels.set(original, label);
+    }
+  }
+  return labels;
+}
+
+/** 归一化目录键：Windows 路径的大小写、分隔符与尾斜杠差异都视为同一目录。 */
+function directoryKey(path: string): string {
+  return path
+    .trim()
+    .replace(/[\\/]+/g, "\\")
+    .replace(/\\+$/, "")
+    .toLowerCase();
+}
+
+/** 去掉盘符与空段的路径段，用于生成带父级的目录标签。 */
+function directoryPathSegments(path: string): string[] {
+  return path
+    .split(PATH_SEPARATOR_PATTERN)
+    .filter(Boolean)
+    .filter((segment) => !/^[a-zA-Z]:$/.test(segment));
+}
+
 export function entrypointLabel(entrypoint: string | null): string | null {
   if (!entrypoint) {
     return null;

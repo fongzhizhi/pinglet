@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tooltip-window",
+  "description": "Capability for the session tooltip popup",
+  "windows": ["tooltip"],
+  "permissions": ["core:default"]
+}

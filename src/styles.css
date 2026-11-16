@@ -1237,7 +1237,10 @@ input {
 .tooltip {
   position: fixed;
   z-index: 1000;
-  max-width: 300px;
+  /* NOTE: 上限随窗口收窄，避免面板窄于 300px 时详情被窗口边缘裁掉；16px 与 main.ts 的 TOOLTIP_EDGE_MARGIN × 2 对应 */
+  max-width: min(300px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
   padding: 8px 10px;
   border: 1px solid var(--color-border-strong);
   border-radius: 8px;

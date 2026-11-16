@@ -7,6 +7,11 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt as WindowStateAppHandleExt, StateFlags};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Graphics::Gdi::{CLR_INVALID, GetDC, GetPixel, ReleaseDC};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    HWND_TOP, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetWindowPos, ShowWindow,
+};
 
 use crate::notify::hide_notification_window;
 use crate::tray::{refresh_tray, sync_show_item};
@@ -178,6 +183,8 @@ pub(crate) fn sync_window_activity(app: &tauri::AppHandle) {
 
 /// 真正隐藏主窗口；调用方负责代号校验。
 fn hide_main_window_internal(app: &tauri::AppHandle) -> Result<(), String> {
+    // 主窗口收起后悬浮详情失去上下文，避免独立小窗残留在桌面上
+    crate::tooltip::hide_tooltip_now(app);
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return Ok(());
     };
@@ -232,8 +239,9 @@ fn request_hide_main_window(app: &tauri::AppHandle) {
 
 /// 显示并聚焦主窗口：穿透状态下恢复可点击，最小化时先还原。
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
-    // 主窗口出现后通知弹窗没有继续停留的必要，避免悬浮托盘时留下的卡片遮住面板
+    // 主窗口出现后通知弹窗与悬浮详情没有继续停留的必要，避免遮住面板
     hide_notification_window(app.clone());
+    crate::tooltip::hide_tooltip_now(app);
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
@@ -471,6 +479,90 @@ pub fn hide_main_window_now(app: tauri::AppHandle, generation: u64) -> Result<()
     // 本次隐藏已执行，递增代号让兜底线程与迟到的重复调用失效
     state.window_hide_generation.fetch_add(1, Ordering::Relaxed);
     hide_main_window_internal(&app)
+}
+
+/// 同步 WebView2 控制器的可见性。
+/// NOTE: 裸 `ShowWindow` 只改变原生窗口，WebView2 仍认为页面可见：隐藏期间渲染器可能被
+/// 遮挡检测挂起，再次显示时不再出帧。显式切换控制器可见性让渲染器随窗口一起暂停与恢复。
+#[cfg(target_os = "windows")]
+pub(crate) fn set_webview_visible(window: &tauri::WebviewWindow, visible: bool) {
+    let dispatched = window.with_webview(move |platform| {
+        // SAFETY: controller 属于仍存活的 webview；with_webview 回调在主线程执行。
+        if let Err(err) = unsafe { platform.controller().SetIsVisible(visible) } {
+            eprintln!("pinglet: 同步渲染可见性失败: {err}");
+        }
+    });
+    if let Err(err) = dispatched {
+        eprintln!("pinglet: 派发渲染可见性失败: {err}");
+    }
+}
+
+/// 以 `SW_SHOWNOACTIVATE` 显示不抢焦点的辅助窗口（通知弹窗 / 悬浮详情）。
+/// WARN: 不能用 `window.show()`——tao 创建后会清除 MARKER_DONT_FOCUS，show() 走 SW_SHOW，
+/// 即使窗口带 WS_EX_NOACTIVATE 也会被设为前台，抢走用户当前应用的焦点。
+pub(crate) fn show_auxiliary_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|err| format!("获取辅助窗口句柄失败: {err}"))?;
+        // SAFETY: hwnd 来自仍存活的 WebviewWindow，仅执行窗口显示且不激活窗口。
+        unsafe {
+            let _ = ShowWindow(hwnd.0 as _, SW_SHOWNOACTIVATE);
+            // NOTE: 主窗口同样是置顶窗口，同为 topmost 时活动窗口会压在上面；
+            // 先把辅助窗口钉回 TOPMOST，再提到置顶组最上方，避免详情被主面板挡住。
+            let _ = SetWindowPos(
+                hwnd.0 as _,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                hwnd.0 as _,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        set_webview_visible(window, true);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .show()
+            .map_err(|err| format!("显示辅助窗口失败: {err}"))
+    }
+}
+
+/// 用裸 `ShowWindow(SW_HIDE)` 隐藏辅助窗口。
+/// WARN: 不能用 `window.hide()`——显示走的是裸 `ShowWindow`，tao 的 `WindowFlags::VISIBLE`
+/// 始终为 false，`hide()` 的 `apply_diff` 因 diff 为空直接返回，窗口不会真正隐藏。
+pub(crate) fn hide_auxiliary_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window
+            .hwnd()
+            .map_err(|err| format!("获取辅助窗口句柄失败: {err}"))?;
+        set_webview_visible(window, false);
+        // SAFETY: hwnd 来自仍存活的 WebviewWindow；ShowWindow 允许从兜底线程调用。
+        unsafe {
+            let _ = ShowWindow(hwnd.0 as _, SW_HIDE);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .hide()
+            .map_err(|err| format!("隐藏辅助窗口失败: {err}"))
+    }
 }
 
 #[cfg(test)]

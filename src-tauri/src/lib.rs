@@ -18,12 +18,14 @@ mod notify;
 mod session;
 mod settings;
 mod title;
+mod tooltip;
 mod tray;
 mod window;
 
 use crate::monitor::spawn_session_monitor;
 use crate::notify::NotificationPopupPayload;
 use crate::session::AlertItem;
+use crate::tooltip::TooltipPayload;
 use crate::tray::{TrayIcons, TrayRuntime, create_tray};
 use crate::window::{
     SnapEdges, clamp_window_into_work_area, position_window_top_right, show_main_window,
@@ -32,11 +34,13 @@ use crate::window::{
 
 const WINDOW_LABEL: &str = "main";
 const NOTIFICATION_WINDOW_LABEL: &str = "notification";
+const TOOLTIP_WINDOW_LABEL: &str = "tooltip";
 const EVENT_WINDOW_VISIBILITY: &str = "pinglet://window-visibility";
 const EVENT_WINDOW_MOVED: &str = "pinglet://window-moved";
 const EVENT_WINDOW_HIDE_REQUEST: &str = "pinglet://window-hide-request";
 const EVENT_WINDOW_SHOW_REQUEST: &str = "pinglet://window-show-request";
 const EVENT_NOTIFICATION_SHOW: &str = "pinglet://notification-show";
+const EVENT_TOOLTIP_SHOW: &str = "pinglet://tooltip-show";
 /// 应用显示名：通知弹窗标题使用。
 const APP_NAME: &str = "Pinglet";
 /// 与 tauri-plugin-window-state 的默认文件名一致，用于判断是否已有可恢复的位置。
@@ -70,6 +74,12 @@ struct AppState {
     notification_hovered: AtomicBool,
     /// 每次显示 / 主动隐藏都递增，作废旧的自绘弹窗兜底隐藏计时。
     notification_generation: AtomicU64,
+    /// 悬浮详情内容与鼠标位置；独立小窗按需创建，页面通过 `get_tooltip_payload` 拉取。
+    tooltip_payload: Mutex<Option<TooltipPayload>>,
+    tooltip_pointer: Mutex<Option<(f64, f64)>>,
+    tooltip_size: Mutex<Option<(f64, f64)>>,
+    /// 每次显示 / 隐藏悬浮详情都递增，作废页面迟到的尺寸上报。
+    tooltip_generation: AtomicU64,
     /// 主窗口隐藏请求代号：显示或新的隐藏请求都会递增，使旧的延迟隐藏失效。
     window_hide_generation: AtomicU64,
     monitor_stop: AtomicBool,
@@ -99,6 +109,10 @@ impl Default for AppState {
             notification_shown_at: Mutex::new(None),
             notification_hovered: AtomicBool::new(false),
             notification_generation: AtomicU64::new(0),
+            tooltip_payload: Mutex::new(None),
+            tooltip_pointer: Mutex::new(None),
+            tooltip_size: Mutex::new(None),
+            tooltip_generation: AtomicU64::new(0),
             window_hide_generation: AtomicU64::new(0),
             monitor_stop: AtomicBool::new(false),
         }
@@ -113,11 +127,11 @@ pub fn run() {
             show_main_window(app);
         }))
         // 只记忆位置：尺寸由前端按内容自适应并持久化在 localStorage。
-        // NOTE: 通知弹窗由 Pinglet 自己定位，不能进入 window-state 的位置存档。
+        // NOTE: 通知弹窗与悬浮详情由 Pinglet 自己定位，不能进入 window-state 的位置存档。
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(StateFlags::POSITION)
-                .with_denylist(&[NOTIFICATION_WINDOW_LABEL])
+                .with_denylist(&[NOTIFICATION_WINDOW_LABEL, TOOLTIP_WINDOW_LABEL])
                 .build(),
         )
         .plugin(tauri_plugin_autostart::init(
@@ -204,6 +218,11 @@ pub fn run() {
             notify::open_main_window,
             notify::set_notification_hover,
             notify::schedule_notification_hide,
+            tooltip::get_tooltip_payload,
+            tooltip::show_tooltip_window,
+            tooltip::move_tooltip_window,
+            tooltip::resize_tooltip_window,
+            tooltip::hide_tooltip_window,
             window::hide_main_window_now,
             notify::resize_notification_window,
             window::reset_window_position,

@@ -16,6 +16,7 @@ body {
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
+  /* 与窗口尺寸计算保持一致：为卡片边框和进入 / 离开动画留出贴边空间 */
   padding: 3px;
 }
 
@@ -50,6 +51,8 @@ body {
 
 /* 每条告警一张独立卡片，复用会话列表的两行结构：
    第一行状态灯 / 状态 / 目录标签 / 入口图标，第二行标题独占 */
+/* NOTE: 透明窗口在 Windows 10 上会把半透明 box-shadow 合成成黑 / 白描边，
+   卡片层次只靠边框与背景色区分，不使用阴影。 */
 .notification-item {
   display: flex;
   flex-direction: column;
@@ -60,7 +63,6 @@ body {
   border: 1px solid var(--color-border-strong);
   border-radius: calc(var(--font-size-base) * 0.75);
   background: var(--color-settings-bg);
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--color-shadow) 80%, transparent);
   color: inherit;
   font: inherit;
   text-align: left;
@@ -89,18 +91,17 @@ body {
   color: var(--color-state-interrupted);
 }
 
+/* 状态灯与会话行保持一致：只有实心圆点，不用 box-shadow 画光晕 */
 .notification-item-dot {
   flex: none;
   width: calc(var(--font-size-base) * 0.5);
   height: calc(var(--font-size-base) * 0.5);
   border-radius: 50%;
   background: var(--color-state-pending);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-state-pending) 24%, transparent);
 }
 
 .notification-item[data-kind="interrupted"] .notification-item-dot {
   background: var(--color-state-interrupted);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-state-interrupted) 24%, transparent);
 }
 
 .notification-item-status {

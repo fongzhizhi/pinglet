@@ -6,7 +6,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import type { ListResult } from "./session-state";
+import type { ListResult, SessionTooltip } from "./session-state";
 
 // NOTE: isTauri() 在个别版本可能未注入，__TAURI_INTERNALS__ 是 Tauri 2 的稳定标志
 export const IS_TAURI = isTauri() || "__TAURI_INTERNALS__" in window;
@@ -222,4 +222,24 @@ export async function activateSession(
 ): Promise<void> {
   requireTauri();
   await invoke("activate_session", { cwd, entrypoint, name, pid });
+}
+
+/** 悬停详情改用独立置顶小窗，避免详情被主面板宽高裁切。 */
+export async function showSessionTooltip(
+  tooltip: SessionTooltip,
+  pointerX: number,
+  pointerY: number,
+): Promise<void> {
+  requireTauri();
+  await invoke("show_tooltip_window", { payload: tooltip, pointerX, pointerY });
+}
+
+export async function moveSessionTooltip(pointerX: number, pointerY: number): Promise<void> {
+  requireTauri();
+  await invoke("move_tooltip_window", { pointerX, pointerY });
+}
+
+export async function hideSessionTooltip(): Promise<void> {
+  requireTauri();
+  await invoke("hide_tooltip_window");
 }

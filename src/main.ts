@@ -16,6 +16,7 @@ import {
   classify,
   createHiddenSessionSnapshot,
   describeDuration,
+  directoryLabels,
   directoryName,
   entrypointLabel,
   getRowKey,
@@ -25,6 +26,7 @@ import {
   type HiddenSessionSnapshot,
   type ListResult,
   type SessionRow,
+  type SessionTooltip,
 } from "./session-state";
 import {
   getSettings,
@@ -41,8 +43,10 @@ import {
   activateSession,
   closeWindow,
   hideMainWindowNow,
+  hideSessionTooltip,
   keepWindowInsideWorkArea,
   listSessions,
+  moveSessionTooltip,
   onOpenSettings,
   onTrayClickThroughChange,
   onWindowHideRequest,
@@ -57,6 +61,7 @@ import {
   setCloseToTray,
   setActivityPreferences,
   setGlobalShortcut,
+  showSessionTooltip,
   startResizeDragging,
   toMessage,
   type ResizeDirection,
@@ -94,6 +99,8 @@ const SETTINGS_BORDER_HEIGHT = 2;
 const TOOLTIP_OFFSET = 12;
 const TOOLTIP_EDGE_MARGIN = 8;
 const TOOLTIP_SHOW_DELAY_MS = 1500;
+/** 独立详情窗口跟随鼠标的节流间隔；窗口定位是跨进程调用，无需按指针事件频率刷新。 */
+const TOOLTIP_MOVE_THROTTLE_MS = 40;
 const LOGO_TOOLTIP_GAP = 8;
 const SCROLLBAR_HIDE_DELAY_MS = 900;
 // 呼吸灯动画：1.1s 一轮；异常提醒三轮、完成提示一轮，留 100ms 余量避免末轮被提前移除
@@ -221,6 +228,9 @@ let hasRenderedSessions = false;
 let emptyElement: HTMLDivElement | null = null;
 let hoveredRowKey: string | null = null;
 let tooltipTimer: number | undefined;
+// 桌面端详情显示在独立小窗；浏览器预览回退到面板内的 DOM 提示
+let isTooltipVisible = false;
+let lastTooltipMoveAt = 0;
 let logoHoverTimer: number | undefined;
 let isLogoHovered = false;
 let pointerX = 0;
@@ -308,7 +318,7 @@ function createRowView(): RowView {
   element.addEventListener("mousemove", (event) => {
     pointerX = event.clientX;
     pointerY = event.clientY;
-    if (!tooltipElement.hidden) {
+    if (isTooltipVisible) {
       positionTooltip(pointerX, pointerY);
     }
   });
@@ -372,6 +382,7 @@ function updateRowView(
   state: BoardState,
   now: number,
   folderColors: Map<string, number>,
+  folderLabel: string,
 ): void {
   const meta = STATE_META[state];
   const key = getRowKey(row);
@@ -386,8 +397,7 @@ function updateRowView(
   view.stateLabel.textContent = meta.label;
   view.name.textContent = row.title;
 
-  const folder = directoryName(row.cwd);
-  view.folder.textContent = folder;
+  view.folder.textContent = folderLabel;
   view.folder.style.setProperty(
     "--tag-color",
     folderTagColor(folderColorKey(row.cwd), folderColors),
@@ -404,7 +414,7 @@ function updateRowView(
   view.element.classList.toggle("is-disabled", isDisabled);
   view.element.tabIndex = isDisabled ? -1 : 0;
   view.element.setAttribute("aria-disabled", String(isDisabled));
-  view.element.setAttribute("aria-label", `${meta.label}，${folder}，${row.title}`);
+  view.element.setAttribute("aria-label", `${meta.label}，${folderLabel}，${row.title}`);
 }
 
 function renderRows(rows: SessionRow[]): void {
@@ -418,6 +428,7 @@ function renderRows(rows: SessionRow[]): void {
     sortedRows.map((row) => folderColorKey(row.cwd)),
     folderColorSlots,
   );
+  const folderLabels = directoryLabels(sortedRows.map((row) => row.cwd));
 
   for (const [key, view] of rowViews) {
     if (desiredKeys.has(key)) {
@@ -442,7 +453,11 @@ function renderRows(rows: SessionRow[]): void {
       rowViews.set(key, view);
     }
     rowsByKey.set(key, row);
-    updateRowView(view, row, classify(row), now, folderColorSlots);
+    const folderLabel =
+      row.cwd === null
+        ? directoryName(null)
+        : (folderLabels.get(row.cwd) ?? directoryName(row.cwd));
+    updateRowView(view, row, classify(row), now, folderColorSlots, folderLabel);
   }
 
   const currentOrder = [...listElement.children]
@@ -745,7 +760,7 @@ function playNotificationSound(): void {
 
 function scheduleTooltip(): void {
   // NOTE: 悬停 1.5 秒才弹出，避免鼠标划过会话行时挡住双击/点击
-  if (hoveredRowKey === null || !tooltipElement.hidden) {
+  if (hoveredRowKey === null || isTooltipVisible) {
     return;
   }
   if (tooltipTimer !== undefined) {
@@ -754,7 +769,7 @@ function scheduleTooltip(): void {
   tooltipTimer = window.setTimeout(() => {
     tooltipTimer = undefined;
     const key = hoveredRowKey;
-    if (key === null || !tooltipElement.hidden) {
+    if (key === null || isTooltipVisible) {
       return;
     }
     const row = rowsByKey.get(key);
@@ -766,9 +781,26 @@ function scheduleTooltip(): void {
 }
 
 function showTooltip(row: SessionRow, x: number, y: number): void {
-  const state = classify(row);
-  const tooltip = buildTooltip(row, state);
+  const tooltip = buildTooltip(row, classify(row));
+  isTooltipVisible = true;
+  lastTooltipMoveAt = performance.now();
 
+  if (IS_TAURI) {
+    // 桌面端显示在独立置顶小窗，不受主面板宽高限制
+    void showSessionTooltip(tooltip, x, y).catch((error: unknown) => {
+      console.warn("pinglet: 显示悬浮详情失败", error);
+      isTooltipVisible = false;
+    });
+    return;
+  }
+
+  // 浏览器预览没有独立窗口，回退到面板内的 DOM 提示
+  renderPreviewTooltip(tooltip);
+  tooltipElement.hidden = false;
+  positionPreviewTooltip(x, y);
+}
+
+function renderPreviewTooltip(tooltip: SessionTooltip): void {
   tooltipTitleElement.textContent = tooltip.title;
   const lineElements = tooltip.lines.map((line) => {
     const element = document.createElement("div");
@@ -783,11 +815,30 @@ function showTooltip(row: SessionRow, x: number, y: number): void {
     lineElements.push(hint);
   }
   tooltipBodyElement.replaceChildren(...lineElements);
-  tooltipElement.hidden = false;
-  positionTooltip(x, y);
 }
 
 function positionTooltip(x: number, y: number): void {
+  if (!isTooltipVisible) {
+    return;
+  }
+
+  if (IS_TAURI) {
+    const now = performance.now();
+    if (now - lastTooltipMoveAt < TOOLTIP_MOVE_THROTTLE_MS) {
+      return;
+    }
+    lastTooltipMoveAt = now;
+    void moveSessionTooltip(x, y).catch((error: unknown) => {
+      console.warn("pinglet: 移动悬浮详情失败", error);
+    });
+    return;
+  }
+
+  positionPreviewTooltip(x, y);
+}
+
+/** 浏览器预览的定位：窗口内翻转与边缘夹取，与独立窗口的定位规则保持一致。 */
+function positionPreviewTooltip(x: number, y: number): void {
   if (tooltipElement.hidden) {
     return;
   }
@@ -812,6 +863,17 @@ function hideTooltip(): void {
   if (tooltipTimer !== undefined) {
     window.clearTimeout(tooltipTimer);
     tooltipTimer = undefined;
+  }
+  if (!isTooltipVisible) {
+    return;
+  }
+  isTooltipVisible = false;
+
+  if (IS_TAURI) {
+    void hideSessionTooltip().catch((error: unknown) => {
+      console.warn("pinglet: 隐藏悬浮详情失败", error);
+    });
+    return;
   }
   tooltipElement.hidden = true;
 }
@@ -1257,6 +1319,8 @@ function handleWindowHideRequest(generation: number): void {
 
 /** 窗口已被系统隐藏 / 最小化：保持收起态，下次显示时播放展开。 */
 function handleWindowHidden(): void {
+  // 窗口收起时独立详情窗口不能继续停留在桌面上
+  hideTooltip();
   if (panelHideTimer !== undefined) {
     window.clearTimeout(panelHideTimer);
     panelHideTimer = undefined;

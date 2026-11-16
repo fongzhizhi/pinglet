@@ -10,12 +10,13 @@ export default defineConfig(() => ({
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
 
-  // 主窗口与右下角通知弹窗是两个独立 HTML 入口
+  // 主窗口、右下角通知弹窗与会话悬浮详情是三个独立 HTML 入口
   build: {
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         notification: fileURLToPath(new URL("./notification.html", import.meta.url)),
+        tooltip: fileURLToPath(new URL("./tooltip.html", import.meta.url)),
       },
     },
   },

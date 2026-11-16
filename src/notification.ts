@@ -8,7 +8,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_ICON_SVG, VSCODE_ICON_SVG } from "./entry-icons";
 import { assignFolderColorSlots, folderColorKey, folderTagColor } from "./folder-colors";
-import { directoryName, entrypointLabel } from "./session-state";
+import { directoryLabels, directoryName, entrypointLabel } from "./session-state";
 import { reloadSettingsFromStorage } from "./settings";
 
 type NotificationItemKind = "blocked" | "interrupted";
@@ -36,7 +36,7 @@ const EVENT_NOTIFICATION_SHOW = "pinglet://notification-show";
 const AUTO_HIDE_MS = 5000;
 /** 淡出动画时长，提前于真正隐藏触发。 */
 const LEAVE_ANIMATION_MS = 240;
-/** body 四周留白，与 notification.css 的 padding 保持一致，用于容纳卡片阴影。 */
+/** body 四周留白，与 notification.css 的 padding 保持一致，用于卡片贴边与动画位移。 */
 const CARD_PADDING_LOGICAL = 3;
 const DEMO_PAYLOAD: NotificationPayload = {
   items: [
@@ -103,6 +103,8 @@ function render(payload: NotificationPayload): void {
     payload.items.map((item) => folderColorKey(item.cwd)),
     new Map(),
   );
+  // 同名目录补上父级前缀，与会话列表保持一致
+  const folderLabels = directoryLabels(payload.items.map((item) => item.cwd));
 
   const rows = payload.items.map((item) => {
     const row = document.createElement("button");
@@ -125,7 +127,10 @@ function render(payload: NotificationPayload): void {
 
     const directory = document.createElement("span");
     directory.className = "notification-item-meta";
-    directory.textContent = directoryName(item.cwd ?? null);
+    directory.textContent =
+      item.cwd === null
+        ? directoryName(null)
+        : (folderLabels.get(item.cwd) ?? directoryName(item.cwd));
     directory.style.setProperty(
       "--tag-color",
       folderTagColor(folderColorKey(item.cwd), folderSlots),

@@ -8,6 +8,7 @@ import {
   classify,
   createHiddenSessionSnapshot,
   describeDuration,
+  directoryLabels,
   directoryName,
   entrypointLabel,
   getRowKey,
@@ -190,6 +191,67 @@ describe("directoryName", () => {
     const name = directoryName(path);
 
     expect(name).toBe(expected);
+  });
+});
+
+describe("directoryLabels", () => {
+  it("should add parent prefixes only when folder names collide", () => {
+    const labels = directoryLabels([
+      "D:\\MyWorking\\repository\\github\\pinglet",
+      "D:\\MyWorking\\repository\\gitlab\\pinglet",
+      "D:\\MyWorking\\other\\notes",
+    ]);
+
+    expect(labels.get("D:\\MyWorking\\repository\\github\\pinglet")).toBe("github/pinglet");
+    expect(labels.get("D:\\MyWorking\\repository\\gitlab\\pinglet")).toBe("gitlab/pinglet");
+    expect(labels.get("D:\\MyWorking\\other\\notes")).toBe("notes");
+  });
+
+  it("should walk further up when parent names also collide", () => {
+    const labels = directoryLabels(["D:\\work\\alpha\\pinglet", "D:\\work2\\alpha\\pinglet"]);
+
+    expect(labels.get("D:\\work\\alpha\\pinglet")).toBe("work/alpha/pinglet");
+    expect(labels.get("D:\\work2\\alpha\\pinglet")).toBe("work2/alpha/pinglet");
+  });
+
+  it("should treat repeated sessions in the same directory as one label", () => {
+    const labels = directoryLabels([
+      "D:\\work\\pinglet",
+      "D:\\work\\pinglet",
+      "D:\\other\\pinglet",
+    ]);
+
+    expect(labels.get("D:\\work\\pinglet")).toBe("work/pinglet");
+    expect(labels.get("D:\\other\\pinglet")).toBe("other/pinglet");
+  });
+
+  it("should merge different spellings of the same directory before comparing", () => {
+    const labels = directoryLabels(["D:\\work\\pinglet", "d:/work/pinglet/", "D:\\other\\pinglet"]);
+
+    expect(labels.get("D:\\work\\pinglet")).toBe("work/pinglet");
+    expect(labels.get("d:/work/pinglet/")).toBe("work/pinglet");
+    expect(labels.get("D:\\other\\pinglet")).toBe("other/pinglet");
+  });
+
+  it("should keep the longest label when all segments are exhausted", () => {
+    const labels = directoryLabels(["D:\\x\\a", "E:\\x\\a"]);
+
+    expect(labels.get("D:\\x\\a")).toBe("x/a");
+    expect(labels.get("E:\\x\\a")).toBe("x/a");
+  });
+
+  it("should handle mixed path separators", () => {
+    const labels = directoryLabels(["D:/work/a/pinglet", "D:\\work\\b\\pinglet"]);
+
+    expect(labels.get("D:/work/a/pinglet")).toBe("a/pinglet");
+    expect(labels.get("D:\\work\\b\\pinglet")).toBe("b/pinglet");
+  });
+
+  it("should skip null and blank paths", () => {
+    const labels = directoryLabels([null, "", "   ", "D:\\work\\pinglet"]);
+
+    expect(labels.size).toBe(1);
+    expect(labels.get("D:\\work\\pinglet")).toBe("pinglet");
   });
 });
 

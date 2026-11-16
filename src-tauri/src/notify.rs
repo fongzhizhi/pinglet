@@ -5,11 +5,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
 
 use crate::session::{AlertItem, BoardKind};
-use crate::window::show_main_window;
+use crate::window::{hide_auxiliary_window, show_auxiliary_window, show_main_window};
 use crate::{APP_NAME, AppState, EVENT_NOTIFICATION_SHOW, NOTIFICATION_WINDOW_LABEL};
 
 /// 通知弹窗最多列举数与标题截断长度，避免内容过长。
@@ -25,7 +23,7 @@ const NOTIFICATION_AUTO_HIDE_FALLBACK: Duration = Duration::from_secs(8);
 /// 鼠标离开托盘或通知弹窗后延迟隐藏：只留出从托盘移到卡片上的缓冲，接近系统 tooltip 的手感。
 const NOTIFICATION_HOVER_HIDE_DELAY: Duration = Duration::from_millis(250);
 /// 悬浮托盘停留多久才展示通知，避免鼠标无意划过时误触发。
-const NOTIFICATION_HOVER_SHOW_DELAY: Duration = Duration::from_millis(600);
+const NOTIFICATION_HOVER_SHOW_DELAY: Duration = Duration::from_millis(400);
 /// 悬浮卡片的最长展示时长，防止 Enter / Leave 事件丢失后卡片一直不消失。
 const NOTIFICATION_MAX_VISIBLE: Duration = Duration::from_secs(12);
 
@@ -204,71 +202,6 @@ fn ensure_notification_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWi
     Ok(window)
 }
 
-/// 同步 WebView2 控制器的可见性。
-/// NOTE: 裸 `ShowWindow` 只改变原生窗口，WebView2 仍认为页面可见：隐藏期间渲染器可能被
-/// 遮挡检测挂起，再次显示时不再出帧（空白卡片）。显式切换控制器可见性让渲染器随窗口
-/// 一起暂停与恢复，第二次及之后的弹窗才能正常绘制新内容。
-#[cfg(target_os = "windows")]
-fn set_notification_webview_visible(window: &tauri::WebviewWindow, visible: bool) {
-    let dispatched = window.with_webview(move |platform| {
-        // SAFETY: controller 属于仍存活的 webview；with_webview 回调在主线程执行。
-        if let Err(err) = unsafe { platform.controller().SetIsVisible(visible) } {
-            eprintln!("pinglet: 同步通知弹窗渲染可见性失败: {err}");
-        }
-    });
-    if let Err(err) = dispatched {
-        eprintln!("pinglet: 派发通知弹窗渲染可见性失败: {err}");
-    }
-}
-
-/// 以 `SW_SHOWNOACTIVATE` 显示通知弹窗。
-/// WARN: 不能用 `window.show()`——tao 创建后会清除 MARKER_DONT_FOCUS，show() 走 SW_SHOW，
-/// 即使窗口带 WS_EX_NOACTIVATE 也会被设为前台，抢走用户当前应用的焦点。
-fn show_notification_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = window
-            .hwnd()
-            .map_err(|err| format!("获取通知弹窗句柄失败: {err}"))?;
-        // SAFETY: hwnd 来自仍存活的 WebviewWindow，仅执行窗口显示且不激活窗口。
-        unsafe {
-            let _ = ShowWindow(hwnd.0 as _, SW_SHOWNOACTIVATE);
-        }
-        set_notification_webview_visible(window, true);
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        window
-            .show()
-            .map_err(|err| format!("显示通知弹窗失败: {err}"))
-    }
-}
-
-/// 用裸 `ShowWindow(SW_HIDE)` 隐藏通知弹窗。
-/// WARN: 不能用 `window.hide()`——显示走的是裸 `ShowWindow`，tao 的 `WindowFlags::VISIBLE`
-/// 始终为 false，`hide()` 的 `apply_diff` 因 diff 为空直接返回，窗口不会真正隐藏。
-fn hide_notification_window_raw(window: &tauri::WebviewWindow) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = window
-            .hwnd()
-            .map_err(|err| format!("获取通知弹窗句柄失败: {err}"))?;
-        set_notification_webview_visible(window, false);
-        // SAFETY: hwnd 来自仍存活的 WebviewWindow；ShowWindow 允许从兜底线程调用。
-        unsafe {
-            let _ = ShowWindow(hwnd.0 as _, SW_HIDE);
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        window
-            .hide()
-            .map_err(|err| format!("隐藏通知弹窗失败: {err}"))
-    }
-}
-
 /// 更新内容并显示通知弹窗；前端负责 5 秒淡出，Rust 侧另有兜底隐藏。
 pub(crate) fn show_notification_popup(
     app: &tauri::AppHandle,
@@ -293,7 +226,7 @@ pub(crate) fn show_notification_popup(
 
     let window = ensure_notification_window(app)?;
     position_notification_window(app, &window);
-    show_notification_window(&window)?;
+    show_auxiliary_window(&window)?;
     // NOTE: 首次创建时事件可能早于页面加载；页面加载后会主动调用 get_notification_payload。
     if let Err(err) = window.emit(EVENT_NOTIFICATION_SHOW, ()) {
         eprintln!("pinglet: 广播通知内容失败: {err}");
@@ -388,7 +321,7 @@ fn schedule_notification_max_visible(app: &tauri::AppHandle) {
                 .notification_generation
                 .fetch_add(1, Ordering::Relaxed);
             if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
-                && let Err(err) = hide_notification_window_raw(&window)
+                && let Err(err) = hide_auxiliary_window(&window)
             {
                 eprintln!("pinglet: 强制隐藏通知弹窗失败: {err}");
             }
@@ -426,7 +359,7 @@ pub(crate) fn schedule_notification_hide_after(
                 return;
             }
             if let Some(window) = thread_app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
-                && let Err(err) = hide_notification_window_raw(&window)
+                && let Err(err) = hide_auxiliary_window(&window)
             {
                 eprintln!("pinglet: 自动隐藏通知弹窗失败: {err}");
             }
@@ -486,7 +419,7 @@ pub fn hide_notification_window(app: tauri::AppHandle) {
         .notification_tray_visible
         .store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(NOTIFICATION_WINDOW_LABEL)
-        && let Err(err) = hide_notification_window_raw(&window)
+        && let Err(err) = hide_auxiliary_window(&window)
     {
         eprintln!("pinglet: 隐藏通知弹窗失败: {err}");
     }

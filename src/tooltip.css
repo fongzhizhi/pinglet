@@ -1,0 +1,26 @@
+@import "./styles.css";
+
+/* ============================================================
+   会话悬浮详情独立窗口：内容决定窗口尺寸，不受主面板宽高限制。
+   ============================================================ */
+
+html,
+body {
+  width: max-content;
+  height: max-content;
+  background: transparent;
+}
+
+body {
+  overflow: visible;
+}
+
+.tooltip {
+  /* 独立窗口里不再相对视口定位，窗口尺寸由内容和 Rust 定位共同决定 */
+  position: static;
+  max-width: 360px;
+  max-height: none;
+  overflow: visible;
+  /* NOTE: 透明窗口在 Windows 10 上会把半透明阴影合成成黑 / 白描边，这里不使用阴影 */
+  box-shadow: none;
+}
